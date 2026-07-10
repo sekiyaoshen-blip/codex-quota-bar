@@ -316,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
         button.title = "Codex …"
-        button.toolTip = "Codex 额度"
+        button.toolTip = "Codex 剩余额度"
         if let image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Codex 额度") {
             image.isTemplate = true
             button.image = image
@@ -326,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureMenu() {
         let menu = NSMenu()
-        let title = NSMenuItem(title: "Codex 额度", action: nil, keyEquivalent: "")
+        let title = NSMenuItem(title: "Codex 剩余额度", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
         menu.addItem(.separator())
@@ -355,8 +355,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
-        let short = snapshot.primary.map { "5h \($0.usedPercent)%" } ?? "5h —"
-        let weekly = snapshot.secondary.map { "周 \($0.usedPercent)%" } ?? "周 —"
+        let short = snapshot.primary.map { "5h \($0.remainingPercent)%" } ?? "5h —"
+        let weekly = snapshot.secondary.map { "周 \($0.remainingPercent)%" } ?? "周 —"
         statusItem.button?.title = "\(short) · \(weekly)"
 
         fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.primary)
@@ -388,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func detailTitle(label: String, window: RateLimitWindow?) -> String {
         guard let window else { return "\(label)：暂无数据" }
-        return "\(label)：已用 \(window.usedPercent)% · 剩余 \(window.remainingPercent)%"
+        return "\(label)：剩余 \(window.remainingPercent)% · 已用 \(window.usedPercent)%"
     }
 
     private func resetText(_ date: Date?) -> String {
@@ -435,8 +435,8 @@ enum CodexQuotaBarMain {
         let client = CodexRateLimitClient()
         var finished = false
         client.onSnapshot = { snapshot in
-            let primary = snapshot.primary.map { "5h=\($0.usedPercent)%" } ?? "5h=none"
-            let secondary = snapshot.secondary.map { "week=\($0.usedPercent)%" } ?? "week=none"
+            let primary = snapshot.primary.map { "5h_remaining=\($0.remainingPercent)%" } ?? "5h_remaining=none"
+            let secondary = snapshot.secondary.map { "week_remaining=\($0.remainingPercent)%" } ?? "week_remaining=none"
             print("SELF_TEST_OK \(primary) \(secondary)")
             finished = true
             CFRunLoopStop(CFRunLoopGetMain())
