@@ -12,6 +12,7 @@ struct RateLimitWindow {
 struct RateLimitSnapshot {
     let primary: RateLimitWindow?
     let secondary: RateLimitWindow?
+    let resetCreditsCount: Int?
 }
 
 final class CodexRateLimitClient {
@@ -49,10 +50,6 @@ final class CodexRateLimitClient {
             refreshTimer = nil
             terminateServer()
         }
-    }
-
-    func refresh() {
-        queue.async { [weak self] in self?.requestRateLimits() }
     }
 
     private func launchServer() {
@@ -180,9 +177,12 @@ final class CodexRateLimitClient {
             raw = codex
         }
         guard let snapshot = raw else { return nil }
+        let resetCredits = container["rateLimitResetCredits"] as? [String: Any]
+        let resetCreditsCount = (resetCredits?["availableCount"] as? NSNumber)?.intValue
         return RateLimitSnapshot(
             primary: parseWindow(snapshot["primary"]),
-            secondary: parseWindow(snapshot["secondary"])
+            secondary: parseWindow(snapshot["secondary"]),
+            resetCreditsCount: resetCreditsCount
         )
     }
 
@@ -266,6 +266,10 @@ final class CodexRateLimitClient {
     private func findCodexExecutable() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "\(home)/Applications/ChatGPT.app/Contents/Resources/codex",
+            "\(home)/Applications/Codex.app/Contents/Resources/codex",
             "\(home)/.local/bin/codex",
             "\(home)/.codex/packages/standalone/current/bin/codex",
             "/opt/homebrew/bin/codex",
@@ -290,8 +294,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let fiveResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let weekItem = NSMenuItem(title: "一周额度：等待数据", action: nil, keyEquivalent: "")
     private let weekResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
+    private let resetCreditsItem = NSMenuItem(title: "剩余重置次数：等待数据", action: nil, keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "正在连接 Codex…", action: nil, keyEquivalent: "")
-    private let refreshItem = NSMenuItem(title: "立即刷新", action: #selector(refreshNow), keyEquivalent: "r")
     private var latestSnapshot: RateLimitSnapshot?
     private var lastUpdated: Date?
 
@@ -301,9 +305,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureMenu()
 
         client.onSnapshot = { [weak self] snapshot in
-            self?.latestSnapshot = snapshot
-            self?.lastUpdated = Date()
-            self?.render(snapshot)
+            guard let self else { return }
+            let merged = RateLimitSnapshot(
+                primary: snapshot.primary ?? self.latestSnapshot?.primary,
+                secondary: snapshot.secondary ?? self.latestSnapshot?.secondary,
+                resetCreditsCount: snapshot.resetCreditsCount ?? self.latestSnapshot?.resetCreditsCount
+            )
+            self.latestSnapshot = merged
+            self.lastUpdated = Date()
+            self.render(merged)
         }
         client.onStateChange = { [weak self] state in self?.render(state) }
         client.start()
@@ -331,15 +341,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(title)
         menu.addItem(.separator())
 
-        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, updateItem].forEach { $0.isEnabled = false }
+        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem, updateItem].forEach { $0.isEnabled = false }
         menu.addItem(fiveHourItem)
         menu.addItem(fiveResetItem)
         menu.addItem(.separator())
         menu.addItem(weekItem)
         menu.addItem(weekResetItem)
         menu.addItem(.separator())
+        menu.addItem(resetCreditsItem)
+        menu.addItem(.separator())
         menu.addItem(updateItem)
-        menu.addItem(refreshItem)
 
         let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: #selector(openUsagePage), keyEquivalent: "")
         usageItem.target = self
@@ -350,19 +361,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        refreshItem.target = self
         statusItem.menu = menu
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
         let short = snapshot.primary.map { "5h \($0.remainingPercent)%" } ?? "5h —"
         let weekly = snapshot.secondary.map { "周 \($0.remainingPercent)%" } ?? "周 —"
-        statusItem.button?.title = "\(short) · \(weekly)"
+        let resets = snapshot.resetCreditsCount.map(String.init) ?? "—"
+        statusItem.button?.title = "\(short) · \(weekly) · ↻\(resets)"
 
         fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.primary)
         fiveResetItem.title = "重置时间：\(resetText(snapshot.primary?.resetsAt))"
         weekItem.title = detailTitle(label: "一周额度", window: snapshot.secondary)
         weekResetItem.title = "重置时间：\(resetText(snapshot.secondary?.resetsAt))"
+        if let count = snapshot.resetCreditsCount {
+            resetCreditsItem.title = "剩余重置次数：\(count)"
+        } else {
+            resetCreditsItem.title = "剩余重置次数：未提供"
+        }
         updateItem.title = "刚刚更新 · 每 1 分钟自动刷新"
     }
 
@@ -371,16 +387,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .starting:
             if latestSnapshot == nil { statusItem.button?.title = "Codex …" }
             updateItem.title = "正在连接 Codex，首次启动可能稍慢…"
-            refreshItem.isEnabled = false
         case .ready:
-            refreshItem.isEnabled = true
             if let lastUpdated {
                 updateItem.title = "上次更新：\(timeFormatter.string(from: lastUpdated)) · 每 1 分钟"
             } else {
                 updateItem.title = "已连接，正在读取额度…"
             }
         case .error(let message):
-            refreshItem.isEnabled = true
             updateItem.title = message
             if latestSnapshot == nil { statusItem.button?.title = "Codex ⚠︎" }
         }
@@ -413,12 +426,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return formatter
     }()
 
-    @objc private func refreshNow() {
-        updateItem.title = "正在刷新…"
-        refreshItem.isEnabled = false
-        client.refresh()
-    }
-
     @objc private func openUsagePage() {
         if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
             NSWorkspace.shared.open(url)
@@ -437,7 +444,8 @@ enum CodexQuotaBarMain {
         client.onSnapshot = { snapshot in
             let primary = snapshot.primary.map { "5h_remaining=\($0.remainingPercent)%" } ?? "5h_remaining=none"
             let secondary = snapshot.secondary.map { "week_remaining=\($0.remainingPercent)%" } ?? "week_remaining=none"
-            print("SELF_TEST_OK \(primary) \(secondary)")
+            let resets = snapshot.resetCreditsCount.map(String.init) ?? "none"
+            print("SELF_TEST_OK \(primary) \(secondary) reset_credits=\(resets)")
             finished = true
             CFRunLoopStop(CFRunLoopGetMain())
         }

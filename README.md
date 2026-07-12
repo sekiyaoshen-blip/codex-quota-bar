@@ -2,14 +2,15 @@
 
 一个轻量的原生 macOS 菜单栏应用，常驻显示 Codex 的 5 小时额度和一周额度剩余量。
 
-`5h 55% · 周 93%`
+`5h 55% · 周 93% · ↻2`
 
 ## 功能
 
 - 每 1 分钟自动刷新 Codex 额度。
 - 菜单栏显示 5 小时和一周窗口的剩余百分比（`100% - 已用百分比`）。
+- 菜单栏以紧凑的 `↻次数` 显示剩余可用重置次数。
 - 下拉菜单显示剩余百分比、已用百分比、重置时间与最近更新时间。
-- 支持手动刷新、打开 Codex 用量页面和断线自动重连。
+- 支持打开 Codex 用量页面和断线自动重连。
 - 原生 AppKit 实现，无第三方运行时依赖，不显示 Dock 图标。
 - 不读取、复制或保存登录凭据；通过本机 Codex App Server 的只读接口获取额度。
 
@@ -17,6 +18,7 @@
 
 - macOS 13 或更高版本。
 - 已安装 Codex CLI，并已使用 ChatGPT 账号登录。
+- 剩余重置次数需要支持 `rateLimitResetCredits` 的较新 Codex 版本；旧版协议下显示 `↻—`。
 - Apple Swift 编译工具；安装 Xcode Command Line Tools 即可。
 
 ## 让 Codex 自动安装
@@ -24,7 +26,7 @@
 将下面整段 Prompt 复制给 Codex，即可让它从本项目地址完成检查、构建、安装和验证：
 
 ```text
-请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、Codex CLI 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码和 scripts/build.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后启动应用，并验证菜单栏能够显示 Codex 的 5 小时和一周剩余额度，确认每分钟刷新功能正常。不要关闭 Gatekeeper，不要读取、输出或复制任何登录令牌；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名检查结果，以及应用是否正常运行。
+请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、Codex CLI 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码和 scripts/build.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后启动应用，并验证菜单栏能够显示 Codex 的 5 小时和一周剩余额度以及剩余重置次数，确认每分钟刷新功能正常。不要关闭 Gatekeeper，不要读取、输出或复制任何登录令牌；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名检查结果，以及应用是否正常运行。
 ```
 
 ## 构建
