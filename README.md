@@ -1,13 +1,13 @@
 # Codex Quota Bar / Codex 额度栏
 
-一个轻量的原生 macOS 菜单栏应用，常驻显示 Codex 的 5 小时额度和一周额度剩余量。
+一个轻量的原生 macOS 菜单栏应用，按当前账号实际提供的额度窗口显示 Codex 剩余量。
 
-`5h 55% · 周 93% · ↻2`
+`周 99% · ↻2`
 
 ## 功能
 
 - 每 1 分钟自动刷新 Codex 额度。
-- 菜单栏显示 5 小时和一周窗口的剩余百分比（`100% - 已用百分比`）。
+- 菜单栏按 Codex 实际返回的窗口时长显示剩余百分比（`100% - 已用百分比`）；没有 5 小时窗口时不会显示虚假的 `5h` 项。
 - 菜单栏以紧凑的 `↻次数` 显示剩余可用重置次数。
 - 下拉菜单显示剩余百分比、已用百分比、重置时间与最近更新时间。
 - 支持打开 Codex 用量页面和断线自动重连。
@@ -26,7 +26,7 @@
 将下面整段 Prompt 复制给 Codex，即可让它从本项目地址完成检查、构建、安装和验证：
 
 ```text
-请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、Codex CLI 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码和 scripts/build.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后启动应用，并验证菜单栏能够显示 Codex 的 5 小时和一周剩余额度以及剩余重置次数，确认每分钟刷新功能正常。不要关闭 Gatekeeper，不要读取、输出或复制任何登录令牌；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名检查结果，以及应用是否正常运行。
+请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、Codex CLI 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码和 scripts/build.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后启动应用，并验证菜单栏能按当前账号实际提供的额度窗口显示剩余额度和剩余重置次数（如果当前只有 weekly，就不应显示 5h），确认每分钟刷新功能正常。不要关闭 Gatekeeper，不要读取、输出或复制任何登录令牌；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名检查结果，以及应用是否正常运行。
 ```
 
 ## 构建
@@ -78,4 +78,4 @@ account/rateLimits/read
 
 ---
 
-English: A tiny native macOS menu bar app that displays remaining Codex five-hour and weekly quota percentages, refreshed every minute. Build it with `./scripts/build.sh`.
+English: A tiny native macOS menu bar app that displays the quota windows currently provided by Codex, refreshed every minute. Build it with `./scripts/build.sh`.

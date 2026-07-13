@@ -10,8 +10,8 @@ struct RateLimitWindow {
 }
 
 struct RateLimitSnapshot {
-    let primary: RateLimitWindow?
-    let secondary: RateLimitWindow?
+    let fiveHour: RateLimitWindow?
+    let weekly: RateLimitWindow?
     let resetCreditsCount: Int?
 }
 
@@ -22,7 +22,7 @@ final class CodexRateLimitClient {
         case error(String)
     }
 
-    var onSnapshot: ((RateLimitSnapshot) -> Void)?
+    var onSnapshot: ((RateLimitSnapshot, Bool) -> Void)?
     var onStateChange: ((State) -> Void)?
 
     private let queue = DispatchQueue(label: "com.seki.codexquotabar.client")
@@ -154,7 +154,7 @@ final class CodexRateLimitClient {
             requestInFlight = false
             if let result = message["result"] as? [String: Any],
                let snapshot = parseSnapshot(from: result) {
-                publishSnapshot(snapshot)
+                publishSnapshot(snapshot, isPartial: false)
                 publishState(.ready)
             } else if let error = message["error"] as? [String: Any],
                       let detail = error["message"] as? String {
@@ -166,7 +166,7 @@ final class CodexRateLimitClient {
         if message["method"] as? String == "account/rateLimits/updated",
            let params = message["params"] as? [String: Any],
            let snapshot = parseSnapshot(from: params) {
-            publishSnapshot(snapshot)
+            publishSnapshot(snapshot, isPartial: true)
         }
     }
 
@@ -177,13 +177,48 @@ final class CodexRateLimitClient {
             raw = codex
         }
         guard let snapshot = raw else { return nil }
+        let primary = parseWindow(snapshot["primary"])
+        let secondary = parseWindow(snapshot["secondary"])
+        let classified = classifyWindows(primary: primary, secondary: secondary)
         let resetCredits = container["rateLimitResetCredits"] as? [String: Any]
         let resetCreditsCount = (resetCredits?["availableCount"] as? NSNumber)?.intValue
         return RateLimitSnapshot(
-            primary: parseWindow(snapshot["primary"]),
-            secondary: parseWindow(snapshot["secondary"]),
+            fiveHour: classified.fiveHour,
+            weekly: classified.weekly,
             resetCreditsCount: resetCreditsCount
         )
+    }
+
+    private func classifyWindows(
+        primary: RateLimitWindow?,
+        secondary: RateLimitWindow?
+    ) -> (fiveHour: RateLimitWindow?, weekly: RateLimitWindow?) {
+        var fiveHour: RateLimitWindow?
+        var weekly: RateLimitWindow?
+
+        for window in [primary, secondary].compactMap({ $0 }) {
+            guard let duration = window.windowDurationMins else { continue }
+            if duration == 300 {
+                fiveHour = window
+            } else if duration == 10_080 {
+                weekly = window
+            }
+        }
+
+        // Compatibility fallback for older responses that omit durations.
+        if primary?.windowDurationMins == nil { fiveHour = primary }
+        if secondary?.windowDurationMins == nil { weekly = secondary }
+        if fiveHour == nil, weekly == nil, let primary {
+            if (primary.windowDurationMins ?? 0) >= 1_440 {
+                weekly = primary
+            } else {
+                fiveHour = primary
+            }
+        }
+        if weekly == nil, let secondary, secondary.windowDurationMins ?? 0 >= 1_440 {
+            weekly = secondary
+        }
+        return (fiveHour, weekly)
     }
 
     private func parseWindow(_ value: Any?) -> RateLimitWindow? {
@@ -278,8 +313,8 @@ final class CodexRateLimitClient {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private func publishSnapshot(_ snapshot: RateLimitSnapshot) {
-        DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot) }
+    private func publishSnapshot(_ snapshot: RateLimitSnapshot, isPartial: Bool) {
+        DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot, isPartial) }
     }
 
     private func publishState(_ state: State) {
@@ -292,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let fiveHourItem = NSMenuItem(title: "5 小时额度：等待数据", action: nil, keyEquivalent: "")
     private let fiveResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
+    private let fiveHourSeparator = NSMenuItem.separator()
     private let weekItem = NSMenuItem(title: "一周额度：等待数据", action: nil, keyEquivalent: "")
     private let weekResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let resetCreditsItem = NSMenuItem(title: "剩余重置次数：等待数据", action: nil, keyEquivalent: "")
@@ -304,13 +340,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureMenu()
 
-        client.onSnapshot = { [weak self] snapshot in
+        client.onSnapshot = { [weak self] snapshot, isPartial in
             guard let self else { return }
-            let merged = RateLimitSnapshot(
-                primary: snapshot.primary ?? self.latestSnapshot?.primary,
-                secondary: snapshot.secondary ?? self.latestSnapshot?.secondary,
-                resetCreditsCount: snapshot.resetCreditsCount ?? self.latestSnapshot?.resetCreditsCount
-            )
+            let merged: RateLimitSnapshot
+            if isPartial {
+                merged = RateLimitSnapshot(
+                    fiveHour: snapshot.fiveHour ?? self.latestSnapshot?.fiveHour,
+                    weekly: snapshot.weekly ?? self.latestSnapshot?.weekly,
+                    resetCreditsCount: snapshot.resetCreditsCount ?? self.latestSnapshot?.resetCreditsCount
+                )
+            } else {
+                merged = snapshot
+            }
             self.latestSnapshot = merged
             self.lastUpdated = Date()
             self.render(merged)
@@ -344,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         [fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem, updateItem].forEach { $0.isEnabled = false }
         menu.addItem(fiveHourItem)
         menu.addItem(fiveResetItem)
-        menu.addItem(.separator())
+        menu.addItem(fiveHourSeparator)
         menu.addItem(weekItem)
         menu.addItem(weekResetItem)
         menu.addItem(.separator())
@@ -365,15 +406,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
-        let short = snapshot.primary.map { "5h \($0.remainingPercent)%" } ?? "5h —"
-        let weekly = snapshot.secondary.map { "周 \($0.remainingPercent)%" } ?? "周 —"
+        var statusParts: [String] = []
+        if let fiveHour = snapshot.fiveHour {
+            statusParts.append("5h \(fiveHour.remainingPercent)%")
+        }
+        if let weekly = snapshot.weekly {
+            statusParts.append("周 \(weekly.remainingPercent)%")
+        }
         let resets = snapshot.resetCreditsCount.map(String.init) ?? "—"
-        statusItem.button?.title = "\(short) · \(weekly) · ↻\(resets)"
+        statusParts.append("↻\(resets)")
+        statusItem.button?.title = statusParts.joined(separator: " · ")
 
-        fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.primary)
-        fiveResetItem.title = "重置时间：\(resetText(snapshot.primary?.resetsAt))"
-        weekItem.title = detailTitle(label: "一周额度", window: snapshot.secondary)
-        weekResetItem.title = "重置时间：\(resetText(snapshot.secondary?.resetsAt))"
+        fiveHourItem.isHidden = snapshot.fiveHour == nil
+        fiveResetItem.isHidden = snapshot.fiveHour == nil
+        fiveHourSeparator.isHidden = snapshot.fiveHour == nil || snapshot.weekly == nil
+        weekItem.isHidden = snapshot.weekly == nil
+        weekResetItem.isHidden = snapshot.weekly == nil
+        fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.fiveHour)
+        fiveResetItem.title = "重置时间：\(resetText(snapshot.fiveHour?.resetsAt))"
+        weekItem.title = detailTitle(label: "一周额度", window: snapshot.weekly)
+        weekResetItem.title = "重置时间：\(resetText(snapshot.weekly?.resetsAt))"
         if let count = snapshot.resetCreditsCount {
             resetCreditsItem.title = "剩余重置次数：\(count)"
         } else {
@@ -441,9 +493,10 @@ enum CodexQuotaBarMain {
     static func runSelfTest() {
         let client = CodexRateLimitClient()
         var finished = false
-        client.onSnapshot = { snapshot in
-            let primary = snapshot.primary.map { "5h_remaining=\($0.remainingPercent)%" } ?? "5h_remaining=none"
-            let secondary = snapshot.secondary.map { "week_remaining=\($0.remainingPercent)%" } ?? "week_remaining=none"
+        client.onSnapshot = { snapshot, _ in
+            guard snapshot.fiveHour != nil || snapshot.weekly != nil else { return }
+            let primary = snapshot.fiveHour.map { "5h_remaining=\($0.remainingPercent)%" } ?? "5h_remaining=none"
+            let secondary = snapshot.weekly.map { "week_remaining=\($0.remainingPercent)%" } ?? "week_remaining=none"
             let resets = snapshot.resetCreditsCount.map(String.init) ?? "none"
             print("SELF_TEST_OK \(primary) \(secondary) reset_credits=\(resets)")
             finished = true
