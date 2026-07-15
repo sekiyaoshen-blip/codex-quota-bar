@@ -385,6 +385,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: #selector(openUsagePage), keyEquivalent: "")
         usageItem.target = self
         menu.addItem(usageItem)
+
+        let tiboItem = NSMenuItem(title: "打开 Tibo 的 X 主页", action: #selector(openTiboProfile), keyEquivalent: "")
+        tiboItem.target = self
+        menu.addItem(tiboItem)
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
@@ -469,6 +473,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openUsagePage() {
         if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openTiboProfile() {
+        if let url = URL(string: "https://x.com/thsottiaux") {
             NSWorkspace.shared.open(url)
         }
     }
