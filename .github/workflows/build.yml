@@ -11,6 +11,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Check shell scripts
+        run: |
+          bash -n scripts/build.sh scripts/install-autostart.sh scripts/uninstall-autostart.sh
+          zsh -n scripts/follow-codex.sh
+
       - name: Build app
         run: ./scripts/build.sh
 

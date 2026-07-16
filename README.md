@@ -13,6 +13,7 @@
 - 支持打开 Codex 用量页面和断线自动重连。
 - 下拉菜单提供“打开 Tibo 的 X 主页”，仅在点击后使用默认浏览器打开 `https://x.com/thsottiaux`。
 - 原生 AppKit 实现，无第三方运行时依赖，不显示 Dock 图标。
+- 可选安装用户级 LaunchAgent：打开官方 ChatGPT/Codex 后，额度栏会在 30 秒内自动启动。
 - 不启动额外的 Codex App Server，不访问 `~/.codex` 下的 SQLite 状态库，因此不会与 ChatGPT Desktop 或 Software Proxy 的启停发生数据库冲突。
 - 每次刷新只在内存中读取现有登录令牌并请求官方 `chatgpt.com` 用量接口；不修改、复制、保存或输出令牌。
 
@@ -27,7 +28,7 @@
 将下面整段 Prompt 复制给 Codex，即可让它从本项目地址完成检查、构建、安装和验证：
 
 ```text
-请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、官方 ChatGPT/Codex 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码和 scripts/build.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后先运行应用内置的 --self-test，再启动应用，验证菜单栏能按当前账号实际提供的额度窗口显示剩余额度和剩余重置次数（如果当前只有 weekly，就不应显示 5h），确认每分钟刷新功能正常，并确认下拉菜单里存在“打开 Tibo 的 X 主页”。还要检查额度栏没有启动额外的 codex app-server，也没有持有 ~/.codex 下的 SQLite 文件；若正在使用 ChatGPT(VPN).app，确认额度栏仍能读取额度，且不会被 Software Proxy 识别为外部 App Server 冲突。安装和验证命令不得打印、复制或检查 auth.json 中的令牌内容；应用自身会按 README 所述仅在内存中读取令牌并请求官方 chatgpt.com。不要关闭 Gatekeeper；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名检查结果、自检结果、菜单项检查结果、无 App Server/SQLite 冲突检查结果，以及应用是否正常运行。
+请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、官方 ChatGPT/Codex 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码以及 scripts/build.sh、scripts/install-autostart.sh 和 scripts/follow-codex.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后运行 ./scripts/install-autostart.sh "/Applications/Codex 额度栏.app"，安装用户级 LaunchAgent，让额度栏在官方 ChatGPT/Codex 主程序打开后 30 秒内自动启动；该检测不得把 Crashpad、Renderer、键盘监控、CLI 或 Software Proxy 辅助进程误认为主程序。然后先运行应用内置的 --self-test，再启动应用，验证菜单栏能按当前账号实际提供的额度窗口显示剩余额度和剩余重置次数（如果当前只有 weekly，就不应显示 5h），确认每分钟刷新功能正常，并确认下拉菜单里存在“打开 Tibo 的 X 主页”。还要检查 LaunchAgent 已注册且最近退出码为 0、重复触发不会启动多个额度栏实例、额度栏没有启动额外的 codex app-server，也没有持有 ~/.codex 下的 SQLite 文件；若正在使用 ChatGPT(VPN).app，确认额度栏仍能读取额度，且不会被 Software Proxy 识别为外部 App Server 冲突。安装和验证命令不得打印、复制或检查 auth.json 中的令牌内容；应用自身会按 README 所述仅在内存中读取令牌并请求官方 chatgpt.com。不要关闭 Gatekeeper；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、跟随启动配置路径、构建与签名检查结果、自检结果、菜单项检查结果、LaunchAgent 与防重复检查结果、无 App Server/SQLite 冲突检查结果，以及应用是否正常运行。
 ```
 
 ## 构建
@@ -54,6 +55,26 @@ cd codex-quota-bar
 
 如果 macOS 阻止首次打开，请在 Finder 中右键应用，选择“打开”，再确认一次。
 
+## 跟随 ChatGPT/Codex 自动启动（可选）
+
+将应用放入“应用程序”后运行：
+
+```bash
+./scripts/install-autostart.sh "/Applications/Codex 额度栏.app"
+```
+
+安装器会创建当前用户专用的 LaunchAgent，每 30 秒检查一次官方 ChatGPT/Codex 主程序。主程序运行且额度栏尚未运行时，额度栏会自动打开；重复检查不会创建多个实例。检测只匹配主可执行文件，不会把退出后残留的 Crashpad、Renderer、键盘监控、CLI 或 Software Proxy 辅助进程当成主程序。
+
+如果应用安装在其他位置，把实际 `.app` 路径作为唯一参数传入。该功能只负责跟随启动；退出 ChatGPT/Codex 时不会强制关闭额度栏。
+
+关闭并移除跟随启动配置：
+
+```bash
+./scripts/uninstall-autostart.sh
+```
+
+卸载脚本不会删除“Codex 额度栏.app”。
+
 ## 实现原理
 
 应用每分钟读取一次 `~/.codex/auth.json` 中现有的 ChatGPT OAuth access token 与 account ID，并通过系统 HTTPS 网络栈请求：
@@ -75,6 +96,7 @@ https://chatgpt.com/backend-api/wham/usage
 - 只使用 `~/.codex/auth.json` 中的 access token 与 account ID，不使用 refresh token 或 ID token。
 - 登录信息仅用于向 `https://chatgpt.com/backend-api/wham/usage` 发起 HTTPS 请求，不修改、不复制到其他文件、不写日志、不上传到第三方。
 - 不启动 `codex app-server`，不读取或持有 `state_*.sqlite`、`logs_*.sqlite` 等本地数据库。
+- 可选跟随启动功能只检查本机进程命令中的官方 ChatGPT/Codex 主可执行路径，不读取这些进程的数据或数据库。
 - “打开 Codex 用量页面”仅在用户点击后使用默认浏览器打开官方页面。
 - “打开 Tibo 的 X 主页”仅在用户点击后使用默认浏览器打开公开主页；应用不会后台读取、抓取或保存 X 内容。
 
