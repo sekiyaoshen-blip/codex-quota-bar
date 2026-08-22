@@ -14,6 +14,9 @@
 - 下拉菜单提供“打开 Tibo 的 X 主页”，仅在点击后使用默认浏览器打开 `https://x.com/thsottiaux`。
 - 原生 AppKit 实现，无第三方运行时依赖，不显示 Dock 图标。
 - 可选安装用户级 LaunchAgent：打开官方 ChatGPT/Codex 后，额度栏会在 30 秒内自动启动。
+- 可手动开启或关闭喝水提醒，并选择每 60、90 或 120 分钟提醒一次。
+- 喝水提醒始终安排在准点或半点；提醒时显示持续置顶的 30 秒倒计时弹窗，结束后自动关闭并恢复此前使用的应用。
+- 喝水提醒不申请“辅助功能”等额外系统权限，也不会锁定系统键盘或鼠标。
 - 不启动额外的 Codex App Server，不访问 `~/.codex` 下的 SQLite 状态库，因此不会与 ChatGPT Desktop 或 Software Proxy 的启停发生数据库冲突。
 - 每次刷新只在内存中读取现有登录令牌并请求官方 `chatgpt.com` 用量接口；不修改、复制、保存或输出令牌。
 
@@ -38,7 +41,7 @@
 将下面整段 Prompt 复制给 Codex，即可让它从本项目地址完成检查、构建、安装和验证：
 
 ```text
-请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、官方 ChatGPT/Codex 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后检查 README 中“一行命令：下载、构建、安装并启动”的命令和 scripts/install.sh，确认没有超出安装所需范围的操作后执行该命令。它应一次完成临时浅克隆、构建、替换 /Applications/Codex 额度栏.app、配置跟随 ChatGPT/Codex 自动启动并立即启动；确认启动成功后删除临时源码和构建中间文件。安装和验证命令不得打印、复制或检查 auth.json 中的令牌内容。完成后验证菜单栏能显示当前账号提供的剩余额度和剩余重置次数、LaunchAgent 已注册、应用只有一个实例，且没有启动额外的 codex app-server 或持有 ~/.codex 下的 SQLite 文件。不要关闭 Gatekeeper；如果遇到必须由我完成的系统授权或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名结果、启动结果、清理结果和上述验证结果。
+请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、官方 ChatGPT/Codex 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后检查 README 中“一行命令：下载、构建、安装并启动”的命令和 scripts/install.sh，确认没有超出安装所需范围的操作后执行该命令。它应一次完成临时浅克隆、构建、替换 /Applications/Codex 额度栏.app、配置跟随 ChatGPT/Codex 自动启动并立即启动；确认启动成功后删除临时源码和构建中间文件。安装和验证命令不得打印、复制或检查 auth.json 中的令牌内容。完成后验证菜单栏能显示当前账号提供的剩余额度和剩余重置次数、LaunchAgent 已注册、应用只有一个实例、喝水提醒子菜单可手动开关并可选择 60/90/120 分钟，且没有启动额外的 codex app-server 或持有 ~/.codex 下的 SQLite 文件。喝水提醒应只使用无需额外权限的持续置顶 30 秒倒计时弹窗，不得申请辅助功能权限或锁定系统键盘鼠标。不要关闭 Gatekeeper；如果遇到必须由我完成的系统授权或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名结果、启动结果、清理结果和上述验证结果。
 ```
 
 ## 一键构建、安装并启动
@@ -96,6 +99,16 @@ cd codex-quota-bar
 ```
 
 卸载脚本不会删除“Codex 额度栏.app”。
+
+## 喝水提醒
+
+点击菜单栏中的额度信息，打开“喝水提醒”子菜单：
+
+1. 选择“开启喝水提醒”或“关闭喝水提醒”。
+2. 选择每 60、90 或 120 分钟提醒一次。
+3. 菜单会显示下一次提醒时间；首次提醒安排在下一个准点或半点，后续继续按所选间隔执行。
+
+提醒时会出现保持在活动前台的 30 秒倒计时弹窗。倒计时结束后弹窗自动关闭，并恢复此前正在使用的应用。该功能不申请辅助功能权限，因此不会进行系统级键盘或鼠标锁定。
 
 ## 实现原理
 
