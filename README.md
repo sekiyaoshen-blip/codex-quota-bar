@@ -23,12 +23,34 @@
 - 已使用官方 ChatGPT/Codex 登录，并存在 `~/.codex/auth.json`。
 - Apple Swift 编译工具；安装 Xcode Command Line Tools 即可。
 
+## 一行命令：下载、构建、安装并启动
+
+在“终端”中粘贴下面这一整行：
+
+```bash
+(workdir="$(/usr/bin/mktemp -d)" && trap '/bin/rm -rf "$workdir"' EXIT && /usr/bin/git clone --depth 1 https://github.com/sekiyaoshen-blip/codex-quota-bar.git "$workdir/codex-quota-bar" && "$workdir/codex-quota-bar/scripts/install.sh")
+```
+
+该命令会从 GitHub 浅克隆项目、构建应用、替换 `/Applications/Codex 额度栏.app`、配置跟随 ChatGPT/Codex 自动启动并立即启动。确认启动成功后，临时源码和构建中间文件会自动删除，只保留已安装应用和运行所需配置。
+
 ## 让 Codex 自动安装
 
 将下面整段 Prompt 复制给 Codex，即可让它从本项目地址完成检查、构建、安装和验证：
 
 ```text
-请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、官方 ChatGPT/Codex 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后在临时目录克隆项目，先检查 README、源码以及 scripts/build.sh、scripts/install-autostart.sh 和 scripts/follow-codex.sh，确认没有超出安装所需范围的操作，再运行 ./scripts/build.sh。构建成功后，将“Codex 额度栏.app”安全复制到 /Applications；如果已有旧版本，先正常退出旧进程再替换，不要影响其他应用或文件。随后运行 ./scripts/install-autostart.sh "/Applications/Codex 额度栏.app"，安装用户级 LaunchAgent，让额度栏在官方 ChatGPT/Codex 主程序打开后 30 秒内自动启动；该检测不得把 Crashpad、Renderer、键盘监控、CLI 或 Software Proxy 辅助进程误认为主程序。然后先运行应用内置的 --self-test，再启动应用，验证菜单栏能按当前账号实际提供的额度窗口显示剩余额度和剩余重置次数（如果当前只有 weekly，就不应显示 5h），确认每分钟刷新功能正常，并确认下拉菜单里存在“打开 Tibo 的 X 主页”。还要检查 LaunchAgent 已注册且最近退出码为 0、重复触发不会启动多个额度栏实例、额度栏没有启动额外的 codex app-server，也没有持有 ~/.codex 下的 SQLite 文件；若正在使用 ChatGPT(VPN).app，确认额度栏仍能读取额度，且不会被 Software Proxy 识别为外部 App Server 冲突。安装和验证命令不得打印、复制或检查 auth.json 中的令牌内容；应用自身会按 README 所述仅在内存中读取令牌并请求官方 chatgpt.com。不要关闭 Gatekeeper；如果遇到必须由我完成的系统授权、开发工具安装或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、跟随启动配置路径、构建与签名检查结果、自检结果、菜单项检查结果、LaunchAgent 与防重复检查结果、无 App Server/SQLite 冲突检查结果，以及应用是否正常运行。
+请帮我从 https://github.com/sekiyaoshen-blip/codex-quota-bar 自动安装“Codex 额度栏”。请先检查这台 Mac 是 Intel 还是 Apple Silicon，并确认 macOS 版本、官方 ChatGPT/Codex 登录状态和 Swift/Xcode Command Line Tools 是否满足项目要求；然后检查 README 中“一行命令：下载、构建、安装并启动”的命令和 scripts/install.sh，确认没有超出安装所需范围的操作后执行该命令。它应一次完成临时浅克隆、构建、替换 /Applications/Codex 额度栏.app、配置跟随 ChatGPT/Codex 自动启动并立即启动；确认启动成功后删除临时源码和构建中间文件。安装和验证命令不得打印、复制或检查 auth.json 中的令牌内容。完成后验证菜单栏能显示当前账号提供的剩余额度和剩余重置次数、LaunchAgent 已注册、应用只有一个实例，且没有启动额外的 codex app-server 或持有 ~/.codex 下的 SQLite 文件。不要关闭 Gatekeeper；如果遇到必须由我完成的系统授权或安全确认，请清楚说明并停在确认步骤。最后告诉我处理器架构、安装路径、构建与签名结果、启动结果、清理结果和上述验证结果。
+```
+
+## 一键构建、安装并启动
+
+```bash
+./scripts/install.sh
+```
+
+该脚本会构建应用、替换 `/Applications/Codex 额度栏.app`、配置跟随 ChatGPT/Codex 自动启动，并立即启动额度栏。也可以传入其他绝对安装路径：
+
+```bash
+./scripts/install.sh "$HOME/Applications/Codex 额度栏.app"
 ```
 
 ## 构建
