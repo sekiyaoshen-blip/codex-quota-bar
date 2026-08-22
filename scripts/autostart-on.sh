@@ -77,15 +77,20 @@ PLIST
 /usr/bin/plutil -lint "$PLIST_TMP" >/dev/null
 /bin/chmod 0644 "$PLIST_TMP"
 
-/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 /bin/launchctl bootout "$DOMAIN/$OLD_LABEL" >/dev/null 2>&1 || true
 /bin/rm -f "$OLD_PLIST_PATH" "$OLD_FOLLOWER_PATH"
 /bin/rm -f "$OLD_LOG_DIR/autostart.out.log" "$OLD_LOG_DIR/autostart.err.log"
 /bin/rmdir "$OLD_LOG_DIR" >/dev/null 2>&1 || true
-/bin/mv -f "$PLIST_TMP" "$PLIST_PATH"
-
-/bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
-/bin/launchctl enable "$DOMAIN/$LABEL"
-/bin/launchctl kickstart "$DOMAIN/$LABEL"
+if [[ -f "$PLIST_PATH" ]] && \
+   /usr/bin/cmp -s "$PLIST_TMP" "$PLIST_PATH" && \
+   /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  # 配置和服务都没有变化，保留现有注册，避免重复触发系统提示。
+  /bin/rm -f "$PLIST_TMP"
+else
+  /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  /bin/mv -f "$PLIST_TMP" "$PLIST_PATH"
+  /bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+  /bin/launchctl enable "$DOMAIN/$LABEL"
+fi
 
 echo "已开启自动启动：$APP_PATH"
