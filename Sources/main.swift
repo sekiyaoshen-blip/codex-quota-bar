@@ -313,7 +313,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("CodexQuotaBar/1.2.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodexQuotaBar/1.2.1", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -669,7 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func resetWaterReminderSchedule() {
-        nextWaterReminderDate = nextHalfHourBoundary(after: Date())
+        nextWaterReminderDate = nextReminderBoundary(after: Date())
         scheduleWaterReminderTimer()
         updateWaterReminderMenu()
     }
@@ -691,12 +691,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         waterReminderTimer = timer
     }
 
-    private func nextHalfHourBoundary(after date: Date) -> Date {
+    private func nextReminderBoundary(after date: Date) -> Date {
         let calendar = Calendar.current
         var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
         components.second = 0
         components.nanosecond = 0
-        if (components.minute ?? 0) < 30 {
+        if waterReminderIntervalMinutes == 90, (components.minute ?? 0) < 30 {
             components.minute = 30
             return calendar.date(from: components) ?? date.addingTimeInterval(30 * 60)
         }
