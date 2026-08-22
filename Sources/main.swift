@@ -28,6 +28,144 @@ final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate {
     }
 }
 
+final class HydrationWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
+final class HydrationOverlayController {
+    private var windows: [HydrationWindow] = []
+    private var countdownLabels: [NSTextField] = []
+    private var countdownTimer: Timer?
+    private var endDate: Date?
+    private var completion: (() -> Void)?
+    private var previousApplication: NSRunningApplication?
+
+    var isShowing: Bool { endDate != nil }
+
+    @discardableResult
+    func show(duration: TimeInterval = 30, completion: @escaping () -> Void) -> Bool {
+        guard !isShowing else { return false }
+
+        self.completion = completion
+        previousApplication = NSWorkspace.shared.frontmostApplication
+        endDate = Date().addingTimeInterval(duration)
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouseLocation) } ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1_200, height: 800)
+        let size = NSSize(width: min(680, visibleFrame.width - 40), height: min(430, visibleFrame.height - 40))
+        let frame = NSRect(
+            x: visibleFrame.midX - size.width / 2,
+            y: visibleFrame.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        let window = HydrationWindow(
+            contentRect: frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false,
+            screen: screen
+        )
+        window.level = .screenSaver
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.ignoresMouseEvents = false
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        window.contentView = makeContentView()
+        windows = [window]
+        bringToFront()
+
+        updateCountdown()
+        let timer = Timer(timeInterval: 0.1, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
+        RunLoop.main.add(timer, forMode: .common)
+        countdownTimer = timer
+        return true
+    }
+
+    func stop() {
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        windows.forEach { $0.orderOut(nil) }
+        windows.removeAll()
+        countdownLabels.removeAll()
+        endDate = nil
+        let applicationToRestore = previousApplication
+        previousApplication = nil
+        if let applicationToRestore,
+           applicationToRestore.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+           !applicationToRestore.isTerminated {
+            applicationToRestore.activate(options: [.activateIgnoringOtherApps])
+        }
+        let callback = completion
+        completion = nil
+        callback?()
+    }
+
+    private func makeContentView() -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.96).cgColor
+        view.layer?.cornerRadius = 28
+        view.layer?.masksToBounds = true
+
+        let title = NSTextField(labelWithString: "该喝水了")
+        title.font = .systemFont(ofSize: 42, weight: .semibold)
+        title.textColor = .white
+        title.alignment = .center
+
+        let countdown = NSTextField(labelWithString: "30")
+        countdown.font = .monospacedDigitSystemFont(ofSize: 96, weight: .bold)
+        countdown.textColor = .white
+        countdown.alignment = .center
+        countdownLabels.append(countdown)
+
+        let hint = NSTextField(labelWithString: "放松眼睛，喝几口水 · 30 秒后自动恢复")
+        hint.font = .systemFont(ofSize: 22, weight: .regular)
+        hint.textColor = NSColor.white.withAlphaComponent(0.75)
+        hint.alignment = .center
+
+        let stack = NSStackView(views: [title, countdown, hint])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 20
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+        return view
+    }
+
+    @objc private func tick() {
+        bringToFront()
+        updateCountdown()
+    }
+
+    private func bringToFront() {
+        NSApp.activate(ignoringOtherApps: true)
+        windows.forEach {
+            $0.orderFrontRegardless()
+            $0.makeKey()
+        }
+    }
+
+    private func updateCountdown() {
+        guard let endDate else { return }
+        let remaining = max(0, endDate.timeIntervalSinceNow)
+        let seconds = Int(ceil(remaining))
+        countdownLabels.forEach { $0.stringValue = String(seconds) }
+        if remaining <= 0 {
+            stop()
+        }
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 final class CodexRateLimitClient {
     enum State: Equatable {
         case starting
@@ -175,7 +313,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("CodexQuotaBar/1.1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("CodexQuotaBar/1.2.0", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -312,6 +450,11 @@ final class CodexRateLimitClient {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private enum WaterReminderDefaults {
+        static let enabled = "waterReminder.enabled"
+        static let intervalMinutes = "waterReminder.intervalMinutes"
+    }
+
     private let client = CodexRateLimitClient()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let fiveHourItem = NSMenuItem(title: "5 小时额度：等待数据", action: nil, keyEquivalent: "")
@@ -321,11 +464,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let weekResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let resetCreditsItem = NSMenuItem(title: "剩余重置次数：等待数据", action: nil, keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "正在连接 Codex…", action: nil, keyEquivalent: "")
+    private let waterReminderRootItem = NSMenuItem(title: "喝水提醒：已关闭", action: nil, keyEquivalent: "")
+    private let waterReminderToggleItem = NSMenuItem(title: "开启喝水提醒", action: nil, keyEquivalent: "")
+    private let nextWaterReminderItem = NSMenuItem(title: "下次提醒：—", action: nil, keyEquivalent: "")
+    private let hydrationOverlay = HydrationOverlayController()
     private var latestSnapshot: RateLimitSnapshot?
     private var lastUpdated: Date?
+    private var waterReminderIntervalItems: [NSMenuItem] = []
+    private var waterReminderTimer: Timer?
+    private var nextWaterReminderDate: Date?
+    private var waterReminderEnabled = false
+    private var waterReminderIntervalMinutes = 60
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        loadWaterReminderPreferences()
         configureStatusItem()
         configureMenu()
 
@@ -347,9 +500,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         client.onStateChange = { [weak self] state in self?.render(state) }
         client.start()
+        if waterReminderEnabled {
+            resetWaterReminderSchedule()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        waterReminderTimer?.invalidate()
+        hydrationOverlay.stop()
         client.stop()
     }
 
@@ -391,11 +549,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(tiboItem)
         menu.addItem(.separator())
 
+        configureWaterReminderMenu()
+        menu.addItem(waterReminderRootItem)
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    private func configureWaterReminderMenu() {
+        let submenu = NSMenu(title: "喝水提醒")
+        waterReminderToggleItem.target = self
+        waterReminderToggleItem.action = #selector(toggleWaterReminder)
+        submenu.addItem(waterReminderToggleItem)
+        submenu.addItem(.separator())
+
+        let intervalTitle = NSMenuItem(title: "提醒间隔", action: nil, keyEquivalent: "")
+        intervalTitle.isEnabled = false
+        submenu.addItem(intervalTitle)
+        waterReminderIntervalItems = [60, 90, 120].map { minutes in
+            let item = NSMenuItem(
+                title: "每 \(minutes) 分钟",
+                action: #selector(selectWaterReminderInterval(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = minutes
+            submenu.addItem(item)
+            return item
+        }
+        submenu.addItem(.separator())
+        nextWaterReminderItem.isEnabled = false
+        submenu.addItem(nextWaterReminderItem)
+        waterReminderRootItem.submenu = submenu
+        updateWaterReminderMenu()
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
@@ -470,6 +660,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         formatter.dateFormat = "M月d日 HH:mm"
         return formatter
     }()
+
+    private func loadWaterReminderPreferences() {
+        let defaults = UserDefaults.standard
+        waterReminderEnabled = defaults.bool(forKey: WaterReminderDefaults.enabled)
+        let savedInterval = defaults.integer(forKey: WaterReminderDefaults.intervalMinutes)
+        waterReminderIntervalMinutes = [60, 90, 120].contains(savedInterval) ? savedInterval : 60
+    }
+
+    private func resetWaterReminderSchedule() {
+        nextWaterReminderDate = nextHalfHourBoundary(after: Date())
+        scheduleWaterReminderTimer()
+        updateWaterReminderMenu()
+    }
+
+    private func scheduleWaterReminderTimer() {
+        waterReminderTimer?.invalidate()
+        waterReminderTimer = nil
+        guard waterReminderEnabled, let nextWaterReminderDate else { return }
+
+        let timer = Timer(
+            fireAt: nextWaterReminderDate,
+            interval: 0,
+            target: self,
+            selector: #selector(waterReminderTimerFired),
+            userInfo: nil,
+            repeats: false
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        waterReminderTimer = timer
+    }
+
+    private func nextHalfHourBoundary(after date: Date) -> Date {
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        components.second = 0
+        components.nanosecond = 0
+        if (components.minute ?? 0) < 30 {
+            components.minute = 30
+            return calendar.date(from: components) ?? date.addingTimeInterval(30 * 60)
+        }
+
+        components.minute = 0
+        let hourStart = calendar.date(from: components) ?? date
+        return calendar.date(byAdding: .hour, value: 1, to: hourStart)
+            ?? date.addingTimeInterval(30 * 60)
+    }
+
+    private func updateWaterReminderMenu() {
+        waterReminderRootItem.title = waterReminderEnabled ? "喝水提醒：已开启" : "喝水提醒：已关闭"
+        waterReminderToggleItem.title = waterReminderEnabled ? "关闭喝水提醒" : "开启喝水提醒"
+        waterReminderToggleItem.state = waterReminderEnabled ? .on : .off
+        waterReminderIntervalItems.forEach {
+            $0.state = $0.tag == waterReminderIntervalMinutes ? .on : .off
+        }
+        if waterReminderEnabled, let nextWaterReminderDate {
+            let text = Calendar.current.isDateInToday(nextWaterReminderDate)
+                ? timeFormatter.string(from: nextWaterReminderDate)
+                : dateFormatter.string(from: nextWaterReminderDate)
+            nextWaterReminderItem.title = "下次提醒：\(text)"
+        } else {
+            nextWaterReminderItem.title = "下次提醒：—"
+        }
+    }
+
+    @objc private func toggleWaterReminder() {
+        waterReminderEnabled.toggle()
+        UserDefaults.standard.set(waterReminderEnabled, forKey: WaterReminderDefaults.enabled)
+        if waterReminderEnabled {
+            resetWaterReminderSchedule()
+        } else {
+            waterReminderTimer?.invalidate()
+            waterReminderTimer = nil
+            nextWaterReminderDate = nil
+            hydrationOverlay.stop()
+            updateWaterReminderMenu()
+        }
+    }
+
+    @objc private func selectWaterReminderInterval(_ sender: NSMenuItem) {
+        guard [60, 90, 120].contains(sender.tag) else { return }
+        waterReminderIntervalMinutes = sender.tag
+        UserDefaults.standard.set(sender.tag, forKey: WaterReminderDefaults.intervalMinutes)
+        if waterReminderEnabled {
+            resetWaterReminderSchedule()
+        } else {
+            updateWaterReminderMenu()
+        }
+    }
+
+    @objc private func waterReminderTimerFired() {
+        waterReminderTimer = nil
+        guard waterReminderEnabled else { return }
+
+        let now = Date()
+        let scheduledDate = nextWaterReminderDate ?? now
+        let interval = TimeInterval(waterReminderIntervalMinutes * 60)
+        var followingDate = scheduledDate.addingTimeInterval(interval)
+        while followingDate <= now {
+            followingDate = followingDate.addingTimeInterval(interval)
+        }
+        nextWaterReminderDate = followingDate
+        scheduleWaterReminderTimer()
+        updateWaterReminderMenu()
+
+        // If the Mac was asleep and missed the boundary, skip the stale reminder
+        // instead of showing it at a non-:00/:30 time after wake.
+        guard now.timeIntervalSince(scheduledDate) <= 60 else { return }
+
+        hydrationOverlay.show(duration: 30) { [weak self] in
+            self?.updateWaterReminderMenu()
+        }
+    }
 
     @objc private func openUsagePage() {
         if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
