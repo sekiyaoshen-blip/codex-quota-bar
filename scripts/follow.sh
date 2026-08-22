@@ -1,10 +1,8 @@
 #!/bin/zsh
 set -u
 
-APP="${CODEX_QUOTA_BAR_APP_PATH:-/Applications/Codex 额度栏.app}"
+APP="${CODEX_QUOTA_BAR_APP_PATH:-/Applications/codex-quota-bar.app}"
 
-# Match only the official app's main executable. Helper, renderer, Crashpad,
-# CLI, and proxy processes must not make the quota bar start by themselves.
 if ! /bin/ps -axo args= | /usr/bin/awk -v home="$HOME" '
   $1 == "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" ||
   $1 == "/Applications/Codex.app/Contents/MacOS/Codex" ||
@@ -20,7 +18,7 @@ if /usr/bin/pgrep -x CodexQuotaBar >/dev/null 2>&1; then
 fi
 
 if [[ ! -x "$APP/Contents/MacOS/CodexQuotaBar" ]]; then
-  print -u2 "Codex 额度栏不存在或不可执行：$APP"
+  print -u2 "找不到应用：$APP"
   exit 1
 fi
 
