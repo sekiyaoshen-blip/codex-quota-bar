@@ -120,7 +120,7 @@ final class HydrationOverlayController {
         countdown.alignment = .center
         countdownLabels.append(countdown)
 
-        let hint = NSTextField(labelWithString: "放松眼睛，喝几口水 · 30 秒后自动恢复")
+        let hint = NSTextField(labelWithString: "放松眼睛，站起来走一走 · 30 秒后自动恢复")
         hint.font = .systemFont(ofSize: 22, weight: .regular)
         hint.textColor = NSColor.white.withAlphaComponent(0.75)
         hint.alignment = .center
