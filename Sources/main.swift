@@ -1,4 +1,5 @@
 import AppKit
+import CFNetwork
 import Foundation
 
 struct RateLimitWindow {
@@ -10,8 +11,21 @@ struct RateLimitWindow {
 }
 
 struct RateLimitSnapshot {
-    let primary: RateLimitWindow?
-    let secondary: RateLimitWindow?
+    let fiveHour: RateLimitWindow?
+    let weekly: RateLimitWindow?
+    let resetCreditsCount: Int?
+}
+
+final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
 }
 
 final class CodexRateLimitClient {
@@ -21,195 +35,160 @@ final class CodexRateLimitClient {
         case error(String)
     }
 
-    var onSnapshot: ((RateLimitSnapshot) -> Void)?
+    var onSnapshot: ((RateLimitSnapshot, Bool) -> Void)?
     var onStateChange: ((State) -> Void)?
 
     private let queue = DispatchQueue(label: "com.seki.codexquotabar.client")
-    private var process: Process?
-    private var inputPipe: Pipe?
-    private var outputPipe: Pipe?
-    private var errorPipe: Pipe?
-    private var outputBuffer = Data()
-    private var initialized = false
     private var requestInFlight = false
-    private var nextRequestID = 1
+    private var currentSession: URLSession?
+    private var currentTask: URLSessionDataTask?
     private var refreshTimer: DispatchSourceTimer?
-    private var restartWorkItem: DispatchWorkItem?
     private var stopped = false
 
+    private func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.timeoutIntervalForRequest = 25
+        configuration.timeoutIntervalForResource = 30
+        if let proxyURL = discoverProxyURL(), let host = proxyURL.host {
+            let port = proxyURL.port ?? (proxyURL.scheme == "https" ? 443 : 80)
+            configuration.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: true,
+                kCFNetworkProxiesHTTPProxy as String: host,
+                kCFNetworkProxiesHTTPPort as String: port,
+                kCFNetworkProxiesHTTPSEnable as String: true,
+                kCFNetworkProxiesHTTPSProxy as String: host,
+                kCFNetworkProxiesHTTPSPort as String: port
+            ]
+        }
+        return URLSession(
+            configuration: configuration,
+            delegate: NoRedirectSessionDelegate(),
+            delegateQueue: nil
+        )
+    }
+
     func start() {
-        queue.async { [weak self] in self?.launchServer() }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.publishState(.starting)
+            self.startRefreshTimer()
+            self.requestRateLimits()
+        }
     }
 
     func stop() {
         queue.sync {
             stopped = true
-            restartWorkItem?.cancel()
             refreshTimer?.cancel()
             refreshTimer = nil
-            terminateServer()
-        }
-    }
-
-    func refresh() {
-        queue.async { [weak self] in self?.requestRateLimits() }
-    }
-
-    private func launchServer() {
-        guard !stopped, process == nil else { return }
-
-        guard let codexPath = findCodexExecutable() else {
-            publishState(.error("未找到 Codex，请先安装或登录 Codex"))
-            scheduleRestart(after: 30)
-            return
-        }
-
-        initialized = false
-        requestInFlight = false
-        outputBuffer.removeAll(keepingCapacity: true)
-        publishState(.starting)
-
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let errors = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: codexPath)
-        process.arguments = ["app-server", "--stdio"]
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = errors
-
-        var environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let preferredPaths = [
-            "\(home)/.local/bin",
-            "\(home)/.cargo/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin"
-        ]
-        let existingPath = environment["PATH"] ?? ""
-        environment["PATH"] = (preferredPaths + [existingPath]).joined(separator: ":")
-        environment["HOME"] = home
-        process.environment = environment
-
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            self?.queue.async { self?.consume(data) }
-        }
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
-        }
-        process.terminationHandler = { [weak self] _ in
-            self?.queue.async { self?.serverTerminated() }
-        }
-
-        do {
-            try process.run()
-            self.process = process
-            inputPipe = input
-            outputPipe = output
-            errorPipe = errors
-            send([
-                "method": "initialize",
-                "id": 0,
-                "params": [
-                    "clientInfo": [
-                        "name": "codex_quota_bar",
-                        "title": "Codex Quota Bar",
-                        "version": "1.0.0"
-                    ]
-                ]
-            ])
-            send(["method": "initialized", "params": [String: Any]()])
-        } catch {
-            terminateServer()
-            publishState(.error("Codex 启动失败：\(error.localizedDescription)"))
-            scheduleRestart(after: 15)
-        }
-    }
-
-    private func consume(_ data: Data) {
-        outputBuffer.append(data)
-        while let newline = outputBuffer.firstIndex(of: 0x0A) {
-            let line = outputBuffer.prefix(upTo: newline)
-            outputBuffer.removeSubrange(...newline)
-            guard !line.isEmpty,
-                  let object = try? JSONSerialization.jsonObject(with: Data(line)),
-                  let message = object as? [String: Any] else { continue }
-            handle(message)
-        }
-    }
-
-    private func handle(_ message: [String: Any]) {
-        if let id = message["id"] as? NSNumber, id.intValue == 0, message["result"] != nil {
-            initialized = true
-            publishState(.ready)
-            startRefreshTimer()
-            requestRateLimits()
-            return
-        }
-
-        if let id = message["id"] as? NSNumber, id.intValue > 0 {
+            currentTask?.cancel()
+            currentTask = nil
+            currentSession?.invalidateAndCancel()
+            currentSession = nil
             requestInFlight = false
-            if let result = message["result"] as? [String: Any],
-               let snapshot = parseSnapshot(from: result) {
-                publishSnapshot(snapshot)
-                publishState(.ready)
-            } else if let error = message["error"] as? [String: Any],
-                      let detail = error["message"] as? String {
-                publishState(.error("读取失败：\(detail)"))
-            }
-            return
-        }
-
-        if message["method"] as? String == "account/rateLimits/updated",
-           let params = message["params"] as? [String: Any],
-           let snapshot = parseSnapshot(from: params) {
-            publishSnapshot(snapshot)
         }
     }
 
     private func parseSnapshot(from container: [String: Any]) -> RateLimitSnapshot? {
-        var raw = container["rateLimits"] as? [String: Any]
-        if let buckets = container["rateLimitsByLimitId"] as? [String: Any],
-           let codex = buckets["codex"] as? [String: Any] {
-            raw = codex
+        guard let rateLimit = container["rate_limit"] as? [String: Any] else { return nil }
+        let primary = parseWindow(rateLimit["primary_window"])
+        let secondary = parseWindow(rateLimit["secondary_window"])
+        let classified = classifyWindows(primary: primary, secondary: secondary)
+        let resetCredits = container["rate_limit_reset_credits"] as? [String: Any]
+        let resetCreditsCount = (resetCredits?["available_count"] as? NSNumber)?.intValue
+        guard classified.fiveHour != nil || classified.weekly != nil || resetCreditsCount != nil else {
+            return nil
         }
-        guard let snapshot = raw else { return nil }
         return RateLimitSnapshot(
-            primary: parseWindow(snapshot["primary"]),
-            secondary: parseWindow(snapshot["secondary"])
+            fiveHour: classified.fiveHour,
+            weekly: classified.weekly,
+            resetCreditsCount: resetCreditsCount
         )
+    }
+
+    private func classifyWindows(
+        primary: RateLimitWindow?,
+        secondary: RateLimitWindow?
+    ) -> (fiveHour: RateLimitWindow?, weekly: RateLimitWindow?) {
+        var fiveHour: RateLimitWindow?
+        var weekly: RateLimitWindow?
+
+        for window in [primary, secondary].compactMap({ $0 }) {
+            guard let duration = window.windowDurationMins else { continue }
+            if duration == 300 {
+                fiveHour = window
+            } else if duration == 10_080 {
+                weekly = window
+            }
+        }
+
+        // Compatibility fallback for older responses that omit durations.
+        if primary?.windowDurationMins == nil { fiveHour = primary }
+        if secondary?.windowDurationMins == nil { weekly = secondary }
+        if fiveHour == nil, weekly == nil, let primary {
+            if (primary.windowDurationMins ?? 0) >= 1_440 {
+                weekly = primary
+            } else {
+                fiveHour = primary
+            }
+        }
+        if weekly == nil, let secondary, secondary.windowDurationMins ?? 0 >= 1_440 {
+            weekly = secondary
+        }
+        return (fiveHour, weekly)
     }
 
     private func parseWindow(_ value: Any?) -> RateLimitWindow? {
         guard let dictionary = value as? [String: Any],
-              let used = dictionary["usedPercent"] as? NSNumber else { return nil }
-        let duration = (dictionary["windowDurationMins"] as? NSNumber)?.intValue
-        let resetTimestamp = (dictionary["resetsAt"] as? NSNumber)?.doubleValue
+              let used = dictionary["used_percent"] as? NSNumber else { return nil }
+        let durationSeconds = (dictionary["limit_window_seconds"] as? NSNumber)?.intValue
+        let resetTimestamp = (dictionary["reset_at"] as? NSNumber)?.doubleValue
         return RateLimitWindow(
-            usedPercent: used.intValue,
-            windowDurationMins: duration,
+            usedPercent: min(100, max(0, Int(used.doubleValue.rounded()))),
+            windowDurationMins: durationSeconds.map { $0 / 60 },
             resetsAt: resetTimestamp.map(Date.init(timeIntervalSince1970:))
         )
     }
 
     private func requestRateLimits() {
-        guard initialized, !requestInFlight, process?.isRunning == true else { return }
+        guard !stopped, !requestInFlight else { return }
         requestInFlight = true
-        let requestID = nextRequestID
-        nextRequestID += 1
-        send(["method": "account/rateLimits/read", "id": requestID])
 
-        queue.asyncAfter(deadline: .now() + 45) { [weak self] in
-            guard let self, self.requestInFlight else { return }
+        let credentials: (accessToken: String, accountID: String?)
+        do {
+            credentials = try loadCredentials()
+        } catch {
             self.requestInFlight = false
-            self.publishState(.error("读取超时，将在下一分钟重试"))
+            publishState(.error("未找到有效登录，请先打开官方 ChatGPT 完成登录"))
+            return
         }
+
+        guard let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
+            requestInFlight = false
+            publishState(.error("官方用量地址无效"))
+            return
+        }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("CodexQuotaBar/1.1.0", forHTTPHeaderField: "User-Agent")
+        if let accountID = credentials.accountID, !accountID.isEmpty {
+            request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+
+        let session = makeSession()
+        currentSession = session
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            self?.queue.async {
+                self?.handleResponse(data: data, response: response, error: error)
+            }
+        }
+        currentTask = task
+        task.resume()
     }
 
     private func startRefreshTimer() {
@@ -221,61 +200,110 @@ final class CodexRateLimitClient {
         refreshTimer = timer
     }
 
-    private func send(_ object: [String: Any]) {
-        guard JSONSerialization.isValidJSONObject(object),
-              var data = try? JSONSerialization.data(withJSONObject: object) else { return }
-        data.append(0x0A)
-        do {
-            try inputPipe?.fileHandleForWriting.write(contentsOf: data)
-        } catch {
-            publishState(.error("无法连接 Codex：\(error.localizedDescription)"))
-        }
-    }
-
-    private func serverTerminated() {
-        guard process != nil else { return }
-        terminateServer()
-        initialized = false
+    private func handleResponse(data: Data?, response: URLResponse?, error: Error?) {
         requestInFlight = false
-        refreshTimer?.cancel()
-        refreshTimer = nil
-        if !stopped {
-            publishState(.error("Codex 连接已断开，正在重连"))
-            scheduleRestart(after: 5)
+        currentTask = nil
+        currentSession?.finishTasksAndInvalidate()
+        currentSession = nil
+        guard !stopped else { return }
+
+        if let error = error as? URLError, error.code == .cancelled { return }
+        guard error == nil else {
+            publishState(.error("网络连接失败，将在下一分钟重试"))
+            return
         }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            publishState(.error("官方用量接口没有返回有效响应"))
+            return
+        }
+        switch httpResponse.statusCode {
+        case 200:
+            break
+        case 401, 403:
+            publishState(.error("登录已过期，请打开官方 ChatGPT 后重试"))
+            return
+        case 429:
+            publishState(.error("官方用量接口暂时繁忙，将在下一分钟重试"))
+            return
+        default:
+            publishState(.error("读取失败（HTTP \(httpResponse.statusCode)）"))
+            return
+        }
+
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let container = object as? [String: Any],
+              let snapshot = parseSnapshot(from: container) else {
+            publishState(.error("官方用量数据格式已变化"))
+            return
+        }
+        publishSnapshot(snapshot, isPartial: false)
+        publishState(.ready)
     }
 
-    private func terminateServer() {
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
-        if let process, process.isRunning { process.terminate() }
-        try? inputPipe?.fileHandleForWriting.close()
-        process = nil
-        inputPipe = nil
-        outputPipe = nil
-        errorPipe = nil
+    private func discoverProxyURL() -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            if let value = environment[key], let url = validProxyURL(value) {
+                return url
+            }
+        }
+
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "command="]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            guard let commands = String(data: data, encoding: .utf8) else { return nil }
+            let officialPrefixes = [
+                "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT ",
+                "/Applications/Codex.app/Contents/MacOS/Codex "
+            ]
+            for rawLine in commands.split(separator: "\n") {
+                let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+                guard officialPrefixes.contains(where: line.hasPrefix),
+                      let marker = line.range(of: "--proxy-server=") else { continue }
+                let suffix = line[marker.upperBound...]
+                let value = suffix.prefix { !$0.isWhitespace }
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+                if let url = validProxyURL(value) { return url }
+            }
+        } catch {
+            return nil
+        }
+        return nil
     }
 
-    private func scheduleRestart(after delay: TimeInterval) {
-        restartWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.launchServer() }
-        restartWorkItem = work
-        queue.asyncAfter(deadline: .now() + delay, execute: work)
+    private func validProxyURL<S: StringProtocol>(_ value: S) -> URL? {
+        guard let url = URL(string: String(value)),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil else { return nil }
+        return url
     }
 
-    private func findCodexExecutable() -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "\(home)/.local/bin/codex",
-            "\(home)/.codex/packages/standalone/current/bin/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex"
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    private func loadCredentials() throws -> (accessToken: String, accountID: String?) {
+        let authURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("auth.json")
+        let data = try Data(contentsOf: authURL, options: .uncached)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = object["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String,
+              !accessToken.isEmpty else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return (accessToken, tokens["account_id"] as? String)
     }
 
-    private func publishSnapshot(_ snapshot: RateLimitSnapshot) {
-        DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot) }
+    private func publishSnapshot(_ snapshot: RateLimitSnapshot, isPartial: Bool) {
+        DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot, isPartial) }
     }
 
     private func publishState(_ state: State) {
@@ -288,10 +316,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let fiveHourItem = NSMenuItem(title: "5 小时额度：等待数据", action: nil, keyEquivalent: "")
     private let fiveResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
+    private let fiveHourSeparator = NSMenuItem.separator()
     private let weekItem = NSMenuItem(title: "一周额度：等待数据", action: nil, keyEquivalent: "")
     private let weekResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
+    private let resetCreditsItem = NSMenuItem(title: "剩余重置次数：等待数据", action: nil, keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "正在连接 Codex…", action: nil, keyEquivalent: "")
-    private let refreshItem = NSMenuItem(title: "立即刷新", action: #selector(refreshNow), keyEquivalent: "r")
     private var latestSnapshot: RateLimitSnapshot?
     private var lastUpdated: Date?
 
@@ -300,10 +329,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureMenu()
 
-        client.onSnapshot = { [weak self] snapshot in
-            self?.latestSnapshot = snapshot
-            self?.lastUpdated = Date()
-            self?.render(snapshot)
+        client.onSnapshot = { [weak self] snapshot, isPartial in
+            guard let self else { return }
+            let merged: RateLimitSnapshot
+            if isPartial {
+                merged = RateLimitSnapshot(
+                    fiveHour: snapshot.fiveHour ?? self.latestSnapshot?.fiveHour,
+                    weekly: snapshot.weekly ?? self.latestSnapshot?.weekly,
+                    resetCreditsCount: snapshot.resetCreditsCount ?? self.latestSnapshot?.resetCreditsCount
+                )
+            } else {
+                merged = snapshot
+            }
+            self.latestSnapshot = merged
+            self.lastUpdated = Date()
+            self.render(merged)
         }
         client.onStateChange = { [weak self] state in self?.render(state) }
         client.start()
@@ -316,7 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
         button.title = "Codex …"
-        button.toolTip = "Codex 额度"
+        button.toolTip = "Codex 剩余额度"
         if let image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Codex 额度") {
             image.isTemplate = true
             button.image = image
@@ -326,43 +366,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureMenu() {
         let menu = NSMenu()
-        let title = NSMenuItem(title: "Codex 额度", action: nil, keyEquivalent: "")
+        let title = NSMenuItem(title: "Codex 剩余额度", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
         menu.addItem(.separator())
 
-        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, updateItem].forEach { $0.isEnabled = false }
+        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem, updateItem].forEach { $0.isEnabled = false }
         menu.addItem(fiveHourItem)
         menu.addItem(fiveResetItem)
-        menu.addItem(.separator())
+        menu.addItem(fiveHourSeparator)
         menu.addItem(weekItem)
         menu.addItem(weekResetItem)
         menu.addItem(.separator())
+        menu.addItem(resetCreditsItem)
+        menu.addItem(.separator())
         menu.addItem(updateItem)
-        menu.addItem(refreshItem)
 
         let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: #selector(openUsagePage), keyEquivalent: "")
         usageItem.target = self
         menu.addItem(usageItem)
+
+        let tiboItem = NSMenuItem(title: "打开 Tibo 的 X 主页", action: #selector(openTiboProfile), keyEquivalent: "")
+        tiboItem.target = self
+        menu.addItem(tiboItem)
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
-        refreshItem.target = self
         statusItem.menu = menu
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
-        let short = snapshot.primary.map { "5h \($0.usedPercent)%" } ?? "5h —"
-        let weekly = snapshot.secondary.map { "周 \($0.usedPercent)%" } ?? "周 —"
-        statusItem.button?.title = "\(short) · \(weekly)"
+        var statusParts: [String] = []
+        if let fiveHour = snapshot.fiveHour {
+            statusParts.append("5h \(fiveHour.remainingPercent)%")
+        }
+        if let weekly = snapshot.weekly {
+            statusParts.append("周 \(weekly.remainingPercent)%")
+        }
+        let resets = snapshot.resetCreditsCount.map(String.init) ?? "—"
+        statusParts.append("↻\(resets)")
+        statusItem.button?.title = statusParts.joined(separator: " · ")
 
-        fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.primary)
-        fiveResetItem.title = "重置时间：\(resetText(snapshot.primary?.resetsAt))"
-        weekItem.title = detailTitle(label: "一周额度", window: snapshot.secondary)
-        weekResetItem.title = "重置时间：\(resetText(snapshot.secondary?.resetsAt))"
+        fiveHourItem.isHidden = snapshot.fiveHour == nil
+        fiveResetItem.isHidden = snapshot.fiveHour == nil
+        fiveHourSeparator.isHidden = snapshot.fiveHour == nil || snapshot.weekly == nil
+        weekItem.isHidden = snapshot.weekly == nil
+        weekResetItem.isHidden = snapshot.weekly == nil
+        fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.fiveHour)
+        fiveResetItem.title = "重置时间：\(resetText(snapshot.fiveHour?.resetsAt))"
+        weekItem.title = detailTitle(label: "一周额度", window: snapshot.weekly)
+        weekResetItem.title = "重置时间：\(resetText(snapshot.weekly?.resetsAt))"
+        if let count = snapshot.resetCreditsCount {
+            resetCreditsItem.title = "剩余重置次数：\(count)"
+        } else {
+            resetCreditsItem.title = "剩余重置次数：未提供"
+        }
         updateItem.title = "刚刚更新 · 每 1 分钟自动刷新"
     }
 
@@ -370,17 +431,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch state {
         case .starting:
             if latestSnapshot == nil { statusItem.button?.title = "Codex …" }
-            updateItem.title = "正在连接 Codex，首次启动可能稍慢…"
-            refreshItem.isEnabled = false
+            updateItem.title = "正在读取 Codex 额度…"
         case .ready:
-            refreshItem.isEnabled = true
             if let lastUpdated {
                 updateItem.title = "上次更新：\(timeFormatter.string(from: lastUpdated)) · 每 1 分钟"
             } else {
-                updateItem.title = "已连接，正在读取额度…"
+                updateItem.title = "正在读取额度…"
             }
         case .error(let message):
-            refreshItem.isEnabled = true
             updateItem.title = message
             if latestSnapshot == nil { statusItem.button?.title = "Codex ⚠︎" }
         }
@@ -388,7 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func detailTitle(label: String, window: RateLimitWindow?) -> String {
         guard let window else { return "\(label)：暂无数据" }
-        return "\(label)：已用 \(window.usedPercent)% · 剩余 \(window.remainingPercent)%"
+        return "\(label)：剩余 \(window.remainingPercent)% · 已用 \(window.usedPercent)%"
     }
 
     private func resetText(_ date: Date?) -> String {
@@ -413,14 +471,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return formatter
     }()
 
-    @objc private func refreshNow() {
-        updateItem.title = "正在刷新…"
-        refreshItem.isEnabled = false
-        client.refresh()
-    }
-
     @objc private func openUsagePage() {
         if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openTiboProfile() {
+        if let url = URL(string: "https://x.com/thsottiaux") {
             NSWorkspace.shared.open(url)
         }
     }
@@ -434,10 +492,12 @@ enum CodexQuotaBarMain {
     static func runSelfTest() {
         let client = CodexRateLimitClient()
         var finished = false
-        client.onSnapshot = { snapshot in
-            let primary = snapshot.primary.map { "5h=\($0.usedPercent)%" } ?? "5h=none"
-            let secondary = snapshot.secondary.map { "week=\($0.usedPercent)%" } ?? "week=none"
-            print("SELF_TEST_OK \(primary) \(secondary)")
+        client.onSnapshot = { snapshot, _ in
+            guard snapshot.fiveHour != nil || snapshot.weekly != nil else { return }
+            let primary = snapshot.fiveHour.map { "5h_remaining=\($0.remainingPercent)%" } ?? "5h_remaining=none"
+            let secondary = snapshot.weekly.map { "week_remaining=\($0.remainingPercent)%" } ?? "week_remaining=none"
+            let resets = snapshot.resetCreditsCount.map(String.init) ?? "none"
+            print("SELF_TEST_OK \(primary) \(secondary) reset_credits=\(resets)")
             finished = true
             CFRunLoopStop(CFRunLoopGetMain())
         }
