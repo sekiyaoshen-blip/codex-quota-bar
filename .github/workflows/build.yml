@@ -13,8 +13,8 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          bash -n scripts/build.sh scripts/install.sh scripts/install-autostart.sh scripts/uninstall-autostart.sh
-          zsh -n scripts/follow-codex.sh
+          bash -n scripts/build.sh scripts/install.sh scripts/autostart-on.sh scripts/autostart-off.sh
+          zsh -n scripts/follow.sh
 
       - name: Build app
         run: ./scripts/build.sh
@@ -22,5 +22,5 @@ jobs:
       - name: Upload app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexQuotaBar-${{ runner.arch }}
-          path: dist/CodexQuotaBar.zip
+          name: codex-quota-bar-${{ runner.arch }}
+          path: dist/codex-quota-bar.zip
