@@ -3,15 +3,12 @@ set -euo pipefail
 
 LABEL="io.github.sekiyaoshen-blip.codex-quota-bar"
 OLD_LABEL="io.github.sekiyaoshen-blip.codexquotabar.autostart"
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
-SOURCE_SCRIPT="$ROOT_DIR/scripts/follow.sh"
-FOLLOWER_DIR="$HOME/.local/bin"
-FOLLOWER_PATH="$FOLLOWER_DIR/codex-quota-bar"
-OLD_FOLLOWER_PATH="$FOLLOWER_DIR/codexquotabar-follow-codex.sh"
+STALE_FOLLOWER_PATH="$HOME/.local/bin/codex-quota-bar"
+OLD_FOLLOWER_PATH="$HOME/.local/bin/codexquotabar-follow-codex.sh"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/$LABEL.plist"
 OLD_PLIST_PATH="$PLIST_DIR/$OLD_LABEL.plist"
-LOG_DIR="$HOME/Library/Logs/codex-quota-bar"
+STALE_LOG_DIR="$HOME/Library/Logs/codex-quota-bar"
 OLD_LOG_DIR="$HOME/Library/Logs/CodexQuotaBar"
 DOMAIN="gui/$(/usr/bin/id -u)"
 
@@ -20,7 +17,7 @@ if [[ $# -gt 1 ]]; then
   exit 2
 fi
 
-APP_INPUT="${1:-/Applications/codex-quota-bar.app}"
+APP_INPUT="${1:-$HOME/Library/Application Support/codex-quota-bar/codex-quota-bar.app}"
 if [[ "$APP_INPUT" != /* ]]; then
   APP_INPUT="$PWD/$APP_INPUT"
 fi
@@ -29,14 +26,14 @@ APP_PARENT="$(cd "$(dirname "$APP_INPUT")" 2>/dev/null && pwd -P)" || {
   exit 1
 }
 APP_PATH="$APP_PARENT/$(basename "$APP_INPUT")"
+FOLLOWER_PATH="$APP_PATH/Contents/Resources/follow.sh"
 
-if [[ ! -x "$APP_PATH/Contents/MacOS/CodexQuotaBar" ]]; then
+if [[ ! -x "$APP_PATH/Contents/MacOS/CodexQuotaBar" || ! -x "$FOLLOWER_PATH" ]]; then
   echo "找不到应用：$APP_PATH" >&2
   exit 1
 fi
 
-mkdir -p "$FOLLOWER_DIR" "$PLIST_DIR" "$LOG_DIR"
-/usr/bin/install -m 0755 "$SOURCE_SCRIPT" "$FOLLOWER_PATH"
+mkdir -p "$PLIST_DIR"
 
 PLIST_TMP="$(/usr/bin/mktemp "$PLIST_DIR/.codex-quota-bar.XXXXXX")"
 trap '/bin/rm -f "$PLIST_TMP"' EXIT
@@ -62,9 +59,9 @@ trap '/bin/rm -f "$PLIST_TMP"' EXIT
     <key>StartInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>STDOUT_PATH</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>STDERR_PATH</string>
+    <string>/dev/null</string>
 </dict>
 </plist>
 PLIST
@@ -72,15 +69,15 @@ PLIST
 /usr/bin/plutil -remove ProgramArguments.0 "$PLIST_TMP"
 /usr/bin/plutil -insert ProgramArguments.0 -string "$FOLLOWER_PATH" "$PLIST_TMP"
 /usr/bin/plutil -replace EnvironmentVariables.CODEX_QUOTA_BAR_APP_PATH -string "$APP_PATH" "$PLIST_TMP"
-/usr/bin/plutil -replace StandardOutPath -string "$LOG_DIR/out.log" "$PLIST_TMP"
-/usr/bin/plutil -replace StandardErrorPath -string "$LOG_DIR/err.log" "$PLIST_TMP"
 /usr/bin/plutil -lint "$PLIST_TMP" >/dev/null
 /bin/chmod 0644 "$PLIST_TMP"
 
 /bin/launchctl bootout "$DOMAIN/$OLD_LABEL" >/dev/null 2>&1 || true
-/bin/rm -f "$OLD_PLIST_PATH" "$OLD_FOLLOWER_PATH"
+/bin/rm -f "$OLD_PLIST_PATH" "$STALE_FOLLOWER_PATH" "$OLD_FOLLOWER_PATH"
+/bin/rmdir "$HOME/.local/bin" >/dev/null 2>&1 || true
+/bin/rm -f "$STALE_LOG_DIR/out.log" "$STALE_LOG_DIR/err.log"
 /bin/rm -f "$OLD_LOG_DIR/autostart.out.log" "$OLD_LOG_DIR/autostart.err.log"
-/bin/rmdir "$OLD_LOG_DIR" >/dev/null 2>&1 || true
+/bin/rmdir "$STALE_LOG_DIR" "$OLD_LOG_DIR" >/dev/null 2>&1 || true
 if [[ -f "$PLIST_PATH" ]] && \
    /usr/bin/cmp -s "$PLIST_TMP" "$PLIST_PATH" && \
    /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then

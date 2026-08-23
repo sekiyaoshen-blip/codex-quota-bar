@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -u
 
-APP="${CODEX_QUOTA_BAR_APP_PATH:-/Applications/codex-quota-bar.app}"
+APP="${CODEX_QUOTA_BAR_APP_PATH:-$HOME/Library/Application Support/codex-quota-bar/codex-quota-bar.app}"
 
 if ! /bin/ps -axo args= | /usr/bin/awk -v home="$HOME" '
   $1 == "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" ||

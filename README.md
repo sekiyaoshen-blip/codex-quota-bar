@@ -20,7 +20,7 @@
 (workdir="$(/usr/bin/mktemp -d)" && trap '/bin/rm -rf "$workdir"' EXIT && /usr/bin/git clone --depth 1 https://github.com/sekiyaoshen-blip/codex-quota-bar.git "$workdir/codex-quota-bar" && "$workdir/codex-quota-bar/scripts/install.sh")
 ```
 
-应用会安装到 `/Applications/codex-quota-bar.app`。重复运行同一命令即可更新。
+应用会安装到 `~/Library/Application Support/codex-quota-bar/`，不会在 `/Applications` 中留下应用图标。重复运行同一命令即可更新。
 
 ## 使用
 
@@ -42,7 +42,7 @@ cd codex-quota-bar
 ./scripts/autostart-off.sh
 ```
 
-然后删除 `/Applications/codex-quota-bar.app`。
+然后删除 `~/Library/Application Support/codex-quota-bar/`。
 
 ## License
 

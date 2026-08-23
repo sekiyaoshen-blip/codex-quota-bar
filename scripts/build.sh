@@ -18,6 +18,7 @@ swiftc \
 
 cp "$BUILD_DIR/CodexQuotaBar" "$APP_DIR/Contents/MacOS/CodexQuotaBar"
 cp "$ROOT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
+/usr/bin/install -m 0755 "$ROOT_DIR/scripts/follow.sh" "$APP_DIR/Contents/Resources/follow.sh"
 
 codesign --force --deep --sign - "$APP_DIR"
 plutil -lint "$APP_DIR/Contents/Info.plist"
