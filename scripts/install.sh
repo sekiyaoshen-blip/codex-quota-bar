@@ -148,6 +148,7 @@ for _ in {1..50}; do
     if ! is_installed_app_running || [[ "$(installed_app_process_count)" -ne 1 ]]; then
       break
     fi
+    "$ROOT_DIR/scripts/aliases.sh" on "$INSTALL_APP"
     /bin/rm -rf "$BACKUP_APP"
     /bin/rm -rf "$LEGACY_APP_SHORT_BACKUP" "$LEGACY_APP_BACKUP"
     for legacy_app in "$LEGACY_APP" "$LEGACY_APP_SHORT"; do

@@ -51,7 +51,7 @@ if ! /usr/bin/curl --fail --location --silent --show-error \
 fi
 
 if ! /bin/mkdir "$UPDATE_REPO" || \
-   ! /usr/bin/tar -xzf "$UPDATE_ARCHIVE" --strip-components=1 -C "$UPDATE_REPO"; then
+   ! /usr/bin/env LC_ALL=C /usr/bin/tar -xzf "$UPDATE_ARCHIVE" --strip-components=1 -C "$UPDATE_REPO"; then
   skip_version
   exit 1
 fi

@@ -10,6 +10,11 @@ for name in "$LABEL" "$OLD_LABEL"; do
   /bin/rm -f "$HOME/Library/LaunchAgents/$name.plist"
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+if [[ -x "$SCRIPT_DIR/aliases.sh" ]]; then
+  "$SCRIPT_DIR/aliases.sh" off
+fi
+
 /bin/rm -f "$HOME/.local/bin/codex-quota-bar" "$HOME/.local/bin/codexquotabar-follow-codex.sh"
 /bin/rm -f "$HOME/Library/Logs/CodexQuotaBar/autostart.out.log" "$HOME/Library/Logs/CodexQuotaBar/autostart.err.log"
 /bin/rmdir "$HOME/Library/Logs/CodexQuotaBar" >/dev/null 2>&1 || true
