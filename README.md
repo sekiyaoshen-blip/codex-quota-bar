@@ -18,7 +18,7 @@
 在终端运行：
 
 ```bash
-(workdir="$(/usr/bin/mktemp -d)" && trap '/bin/rm -rf "$workdir"' EXIT && /usr/bin/git clone --depth 1 https://github.com/sekiyaoshen-blip/codex-quota-bar.git "$workdir/codex-quota-bar" && "$workdir/codex-quota-bar/scripts/install.sh")
+(workdir="$(/usr/bin/mktemp -d)" && trap '/bin/rm -rf "$workdir"' EXIT && /usr/bin/curl --fail --location --show-error --connect-timeout 15 --max-time 120 --retry 2 https://codeload.github.com/sekiyaoshen-blip/codex-quota-bar/tar.gz/refs/heads/main --output "$workdir/source.tar.gz" && /bin/mkdir "$workdir/codex-quota-bar" && /usr/bin/tar -xzf "$workdir/source.tar.gz" --strip-components=1 -C "$workdir/codex-quota-bar" && "$workdir/codex-quota-bar/scripts/install.sh")
 ```
 
 应用会安装到 `~/Library/Application Support/codex-quota-bar/`，不会在 `/Applications` 中留下应用图标。重复运行同一命令即可更新。

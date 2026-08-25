@@ -32,12 +32,21 @@ if [[ ! -w "$INSTALL_DIR" ]]; then
   exit 1
 fi
 
-is_installed_app_running() {
-  /bin/ps -axo command= | /usr/bin/grep -F -x -q "$INSTALL_APP/Contents/MacOS/CodexQuotaBar"
+installed_app_process_count() {
+  /bin/ps -axo command= | /usr/bin/awk -v expected="$INSTALL_APP/Contents/MacOS/CodexQuotaBar" '
+    {
+      command = $0
+      sub(/^[[:space:]]+/, "", command)
+      if (command == expected || index(command, expected " ") == 1) {
+        count++
+      }
+    }
+    END { print count + 0 }
+  '
 }
 
-installed_app_process_count() {
-  /bin/ps -axo command= | /usr/bin/grep -F -x -c "$INSTALL_APP/Contents/MacOS/CodexQuotaBar" || true
+is_installed_app_running() {
+  [[ "$(installed_app_process_count)" -gt 0 ]]
 }
 
 start_app() {

@@ -15,6 +15,7 @@ fi
 
 UPDATE_WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/codex-quota-bar-update.XXXXXX")" || exit 1
 UPDATE_REPO="$UPDATE_WORK_DIR/repo"
+UPDATE_ARCHIVE="$UPDATE_WORK_DIR/source.tar.gz"
 
 cleanup() {
   if [[ -n "$UPDATE_WORK_DIR" && "$UPDATE_WORK_DIR" == */codex-quota-bar-update.* ]]; then
@@ -27,7 +28,30 @@ skip_version() {
   /usr/bin/defaults write "$DEFAULTS_DOMAIN" skipped_update_version -string "$EXPECTED_VERSION" >/dev/null
 }
 
-if ! /usr/bin/git clone --depth 1 https://github.com/sekiyaoshen-blip/codex-quota-bar.git "$UPDATE_REPO" >/dev/null 2>&1; then
+is_installed_app_running() {
+  /bin/ps -axo command= | /usr/bin/awk -v expected="$INSTALL_APP/Contents/MacOS/CodexQuotaBar" '
+    {
+      command = $0
+      sub(/^[[:space:]]+/, "", command)
+      if (command == expected || index(command, expected " ") == 1) {
+        found = 1
+        exit
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+if ! /usr/bin/curl --fail --location --silent --show-error \
+  --connect-timeout 15 --max-time 120 --retry 2 \
+  https://codeload.github.com/sekiyaoshen-blip/codex-quota-bar/tar.gz/refs/heads/main \
+  --output "$UPDATE_ARCHIVE"; then
+  skip_version
+  exit 1
+fi
+
+if ! /bin/mkdir "$UPDATE_REPO" || \
+   ! /usr/bin/tar -xzf "$UPDATE_ARCHIVE" --strip-components=1 -C "$UPDATE_REPO"; then
   skip_version
   exit 1
 fi
@@ -44,7 +68,7 @@ if "$UPDATE_REPO/scripts/install.sh" "$INSTALL_APP" >/dev/null 2>&1; then
 fi
 
 skip_version
-if ! /bin/ps -axo command= | /usr/bin/grep -F -x -q "$INSTALL_APP/Contents/MacOS/CodexQuotaBar"; then
+if ! is_installed_app_running; then
   /usr/bin/open -n -g -j -a "$INSTALL_APP" >/dev/null 2>&1 || true
 fi
 exit 1
