@@ -87,7 +87,7 @@ else
   /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
   /bin/mv -f "$PLIST_TMP" "$PLIST_PATH"
   /bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
-  /bin/launchctl enable "$DOMAIN/$LABEL"
 fi
+/bin/launchctl enable "$DOMAIN/$LABEL"
 
 echo "已开启自动启动：$APP_PATH"

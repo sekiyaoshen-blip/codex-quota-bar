@@ -44,5 +44,7 @@ if "$UPDATE_REPO/scripts/install.sh" "$INSTALL_APP" >/dev/null 2>&1; then
 fi
 
 skip_version
-/usr/bin/open -gj "$INSTALL_APP" >/dev/null 2>&1 || true
+if ! /bin/ps -axo command= | /usr/bin/grep -F -x -q "$INSTALL_APP/Contents/MacOS/CodexQuotaBar"; then
+  /usr/bin/open -n -g -j -a "$INSTALL_APP" >/dev/null 2>&1 || true
+fi
 exit 1

@@ -22,4 +22,4 @@ if [[ ! -x "$APP/Contents/MacOS/CodexQuotaBar" ]]; then
   exit 1
 fi
 
-/usr/bin/open -gj "$APP"
+/usr/bin/open -n -g -j -a "$APP"
