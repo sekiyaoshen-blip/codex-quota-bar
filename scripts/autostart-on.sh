@@ -26,7 +26,7 @@ APP_PARENT="$(cd "$(dirname "$APP_INPUT")" 2>/dev/null && pwd -P)" || {
   exit 1
 }
 APP_PATH="$APP_PARENT/$(basename "$APP_INPUT")"
-FOLLOWER_PATH="$APP_PATH/Contents/Resources/follow.sh"
+FOLLOWER_PATH="$APP_PATH/Contents/Resources/codex-quota-bar"
 
 if [[ ! -x "$APP_PATH/Contents/MacOS/CodexQuotaBar" || ! -x "$FOLLOWER_PATH" ]]; then
   echo "找不到应用：$APP_PATH" >&2

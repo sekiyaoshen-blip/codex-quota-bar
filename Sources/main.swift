@@ -183,13 +183,16 @@ final class CodexRateLimitClient {
     private var refreshTimer: DispatchSourceTimer?
     private var stopped = false
 
-    private func makeSession() -> URLSession {
+    fileprivate static func makeSession(
+        requestTimeout: TimeInterval = 25,
+        resourceTimeout: TimeInterval = 30
+    ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
-        configuration.timeoutIntervalForRequest = 25
-        configuration.timeoutIntervalForResource = 30
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = resourceTimeout
         if let proxyURL = discoverProxyURL(), let host = proxyURL.host {
             let port = proxyURL.port ?? (proxyURL.scheme == "https" ? 443 : 80)
             configuration.connectionProxyDictionary = [
@@ -313,12 +316,12 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.2.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.3.0", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
 
-        let session = makeSession()
+        let session = Self.makeSession()
         currentSession = session
         let task = session.dataTask(with: request) { [weak self] data, response, error in
             self?.queue.async {
@@ -380,7 +383,7 @@ final class CodexRateLimitClient {
         publishState(.ready)
     }
 
-    private func discoverProxyURL() -> URL? {
+    fileprivate static func discoverProxyURL() -> URL? {
         let environment = ProcessInfo.processInfo.environment
         for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
             if let value = environment[key], let url = validProxyURL(value) {
@@ -419,7 +422,7 @@ final class CodexRateLimitClient {
         return nil
     }
 
-    private func validProxyURL<S: StringProtocol>(_ value: S) -> URL? {
+    private static func validProxyURL<S: StringProtocol>(_ value: S) -> URL? {
         guard let url = URL(string: String(value)),
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host != nil else { return nil }
@@ -449,6 +452,148 @@ final class CodexRateLimitClient {
     }
 }
 
+final class AutoUpdater {
+    private enum DefaultsKey {
+        static let lastCheckTime = "last_check_time"
+        static let skippedVersion = "skipped_update_version"
+    }
+
+    private enum UpdateError: Error {
+        case invalidResponse
+        case missingUpdater
+    }
+
+    private let checkInterval: TimeInterval = 24 * 60 * 60
+    private let versionURL = URL(
+        string: "https://raw.githubusercontent.com/sekiyaoshen-blip/codex-quota-bar/main/Info.plist"
+    )!
+    private let defaults = UserDefaults.standard
+    private var isChecking = false
+    private var currentSession: URLSession?
+    private var currentTask: URLSessionDataTask?
+
+    func checkIfNeeded(now: Date = Date()) {
+        guard !isChecking else { return }
+        if let lastCheck = defaults.object(forKey: DefaultsKey.lastCheckTime) as? Date {
+            let elapsed = now.timeIntervalSince(lastCheck)
+            if elapsed >= 0, elapsed < checkInterval { return }
+        }
+
+        isChecking = true
+        var request = URLRequest(
+            url: versionURL,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 20
+        )
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("codex-quota-bar-update-check", forHTTPHeaderField: "User-Agent")
+
+        let session = CodexRateLimitClient.makeSession(requestTimeout: 20, resourceTimeout: 25)
+        currentSession = session
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            let result: Result<String, Error>
+            if let error {
+                result = .failure(error)
+            } else if let httpResponse = response as? HTTPURLResponse,
+                      httpResponse.statusCode == 200,
+                      let data,
+                      let object = try? PropertyListSerialization.propertyList(from: data, format: nil),
+                      let plist = object as? [String: Any],
+                      let version = plist["CFBundleShortVersionString"] as? String,
+                      Self.versionComponents(version) != nil {
+                result = .success(version)
+            } else {
+                result = .failure(UpdateError.invalidResponse)
+            }
+            DispatchQueue.main.async {
+                self?.finishCheck(result: result, at: now)
+            }
+        }
+        currentTask = task
+        task.resume()
+    }
+
+    func stop() {
+        currentTask?.cancel()
+        currentTask = nil
+        currentSession?.invalidateAndCancel()
+        currentSession = nil
+        isChecking = false
+    }
+
+    private func finishCheck(result: Result<String, Error>, at date: Date) {
+        currentTask = nil
+        currentSession?.finishTasksAndInvalidate()
+        currentSession = nil
+        isChecking = false
+        defaults.set(date, forKey: DefaultsKey.lastCheckTime)
+
+        guard case .success(let latestVersion) = result,
+              let currentVersion = Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+              ) as? String,
+              Self.isNewer(latestVersion, than: currentVersion),
+              defaults.string(forKey: DefaultsKey.skippedVersion) != latestVersion else {
+            return
+        }
+
+        // Mark before launching. A successful updater clears this value; any failure leaves it skipped.
+        defaults.set(latestVersion, forKey: DefaultsKey.skippedVersion)
+        do {
+            try launchUpdater(version: latestVersion)
+        } catch {
+            return
+        }
+    }
+
+    private func launchUpdater(version: String) throws {
+        guard Self.versionComponents(version) != nil,
+              let updaterURL = Bundle.main.url(forResource: "update", withExtension: "sh"),
+              FileManager.default.isExecutableFile(atPath: updaterURL.path),
+              let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            throw UpdateError.missingUpdater
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [updaterURL.path, version, Bundle.main.bundlePath, bundleIdentifier]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        var environment = ProcessInfo.processInfo.environment
+        if environment["HTTPS_PROXY"] == nil,
+           environment["https_proxy"] == nil,
+           let proxyURL = CodexRateLimitClient.discoverProxyURL() {
+            environment["HTTPS_PROXY"] = proxyURL.absoluteString
+            environment["HTTP_PROXY"] = proxyURL.absoluteString
+        }
+        process.environment = environment
+        try process.run()
+    }
+
+    private static func versionComponents(_ version: String) -> [Int]? {
+        let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+        guard !parts.isEmpty else { return nil }
+        let values = parts.compactMap { component -> Int? in
+            guard !component.isEmpty, component.allSatisfy(\.isNumber) else { return nil }
+            return Int(component)
+        }
+        return values.count == parts.count ? values : nil
+    }
+
+    private static func isNewer(_ candidate: String, than current: String) -> Bool {
+        guard let candidateParts = versionComponents(candidate),
+              let currentParts = versionComponents(current) else { return false }
+        let count = max(candidateParts.count, currentParts.count)
+        for index in 0..<count {
+            let candidateValue = index < candidateParts.count ? candidateParts[index] : 0
+            let currentValue = index < currentParts.count ? currentParts[index] : 0
+            if candidateValue != currentValue { return candidateValue > currentValue }
+        }
+        return false
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private enum WaterReminderDefaults {
         static let enabled = "waterReminder.enabled"
@@ -456,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private let client = CodexRateLimitClient()
+    private let autoUpdater = AutoUpdater()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let fiveHourItem = NSMenuItem(title: "5 小时额度：等待数据", action: nil, keyEquivalent: "")
     private let fiveResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
@@ -497,6 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.latestSnapshot = merged
             self.lastUpdated = Date()
             self.render(merged)
+            if !isPartial { self.autoUpdater.checkIfNeeded() }
         }
         client.onStateChange = { [weak self] state in self?.render(state) }
         client.start()
@@ -508,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         waterReminderTimer?.invalidate()
         hydrationOverlay.stop()
+        autoUpdater.stop()
         client.stop()
     }
 

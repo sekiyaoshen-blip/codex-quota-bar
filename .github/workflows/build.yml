@@ -13,7 +13,7 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          bash -n scripts/build.sh scripts/install.sh scripts/autostart-on.sh scripts/autostart-off.sh
+          bash -n scripts/build.sh scripts/install.sh scripts/autostart-on.sh scripts/autostart-off.sh scripts/update.sh
           zsh -n scripts/follow.sh
 
       - name: Build app
