@@ -320,7 +320,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.3.4", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.3.5", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -664,14 +664,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusItem() {
+        statusItem.autosaveName = "io.github.sekiyaoshen-blip.codexquotabar.status-item"
+        statusItem.isVisible = true
         guard let button = statusItem.button else { return }
-        button.title = "Codex …"
+        button.title = "…↻—"
         button.toolTip = "Codex 剩余额度"
-        if let image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Codex 额度") {
-            image.isTemplate = true
-            button.image = image
-            button.imagePosition = .imageLeading
-        }
     }
 
     private func configureMenu() {
@@ -743,14 +740,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func render(_ snapshot: RateLimitSnapshot) {
         var statusParts: [String] = []
         if let fiveHour = snapshot.fiveHour {
-            statusParts.append("5h \(fiveHour.remainingPercent)%")
+            statusParts.append("5h\(fiveHour.remainingPercent)%")
         }
         if let weekly = snapshot.weekly {
-            statusParts.append("周 \(weekly.remainingPercent)%")
+            let prefix = snapshot.fiveHour == nil ? "" : "周"
+            statusParts.append("\(prefix)\(weekly.remainingPercent)%")
         }
         let resets = snapshot.resetCreditsCount.map(String.init) ?? "—"
         statusParts.append("↻\(resets)")
-        statusItem.button?.title = statusParts.joined(separator: " · ")
+        statusItem.button?.title = statusParts.joined()
 
         fiveHourItem.isHidden = snapshot.fiveHour == nil
         fiveResetItem.isHidden = snapshot.fiveHour == nil
@@ -772,7 +770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func render(_ state: CodexRateLimitClient.State) {
         switch state {
         case .starting:
-            if latestSnapshot == nil { statusItem.button?.title = "Codex …" }
+            if latestSnapshot == nil { statusItem.button?.title = "…↻—" }
             updateItem.title = "正在读取 Codex 额度…"
         case .ready:
             if let lastUpdated {
@@ -782,7 +780,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         case .error(let message):
             updateItem.title = message
-            if latestSnapshot == nil { statusItem.button?.title = "Codex ⚠︎" }
+            if latestSnapshot == nil { statusItem.button?.title = "⚠︎" }
         }
     }
 
