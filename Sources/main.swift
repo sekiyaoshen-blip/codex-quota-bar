@@ -95,7 +95,11 @@ final class HydrationOverlayController {
         if let applicationToRestore,
            applicationToRestore.processIdentifier != ProcessInfo.processInfo.processIdentifier,
            !applicationToRestore.isTerminated {
-            applicationToRestore.activate(options: [.activateIgnoringOtherApps])
+            if #available(macOS 14.0, *) {
+                applicationToRestore.activate(options: [])
+            } else {
+                applicationToRestore.activate(options: [.activateIgnoringOtherApps])
+            }
         }
         let callback = completion
         completion = nil
@@ -316,7 +320,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.3.3", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.3.4", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }

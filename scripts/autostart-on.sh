@@ -12,6 +12,44 @@ STALE_LOG_DIR="$HOME/Library/Logs/codex-quota-bar"
 OLD_LOG_DIR="$HOME/Library/Logs/CodexQuotaBar"
 DOMAIN="gui/$(/usr/bin/id -u)"
 
+service_matches_app() {
+  local service_info
+  service_info="$(/bin/launchctl print "$DOMAIN/$LABEL" 2>/dev/null)" || return 1
+  /usr/bin/grep -F -q "program = $FOLLOWER_PATH" <<<"$service_info" && \
+    /usr/bin/grep -F -q "CODEX_QUOTA_BAR_APP_PATH => $APP_PATH" <<<"$service_info"
+}
+
+wait_until_unloaded() {
+  for _ in {1..30}; do
+    /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || return 0
+    /bin/sleep 0.1
+  done
+  return 1
+}
+
+bootstrap_service() {
+  local bootstrap_error
+
+  if bootstrap_error="$(/bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH" 2>&1)"; then
+    return 0
+  fi
+  if service_matches_app; then
+    return 0
+  fi
+
+  /bin/sleep 0.5
+  if bootstrap_error="$(/bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH" 2>&1)"; then
+    return 0
+  fi
+  if service_matches_app; then
+    return 0
+  fi
+
+  echo "自动启动配置失败：$bootstrap_error" >&2
+  echo "无需使用 sudo；请重新执行安装命令。" >&2
+  return 1
+}
+
 if [[ $# -gt 1 ]]; then
   echo "用法：$0 [应用路径]" >&2
   exit 2
@@ -78,6 +116,7 @@ PLIST
 /bin/rm -f "$STALE_LOG_DIR/out.log" "$STALE_LOG_DIR/err.log"
 /bin/rm -f "$OLD_LOG_DIR/autostart.out.log" "$OLD_LOG_DIR/autostart.err.log"
 /bin/rmdir "$STALE_LOG_DIR" "$OLD_LOG_DIR" >/dev/null 2>&1 || true
+/bin/launchctl enable "$DOMAIN/$LABEL"
 if [[ -f "$PLIST_PATH" ]] && \
    /usr/bin/cmp -s "$PLIST_TMP" "$PLIST_PATH" && \
    /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
@@ -85,9 +124,9 @@ if [[ -f "$PLIST_PATH" ]] && \
   /bin/rm -f "$PLIST_TMP"
 else
   /bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  wait_until_unloaded || true
   /bin/mv -f "$PLIST_TMP" "$PLIST_PATH"
-  /bin/launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
+  bootstrap_service
 fi
-/bin/launchctl enable "$DOMAIN/$LABEL"
 
 echo "已开启自动启动：$APP_PATH"
