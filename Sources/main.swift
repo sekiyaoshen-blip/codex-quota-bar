@@ -320,7 +320,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.3.6", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.3.7", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -467,7 +467,7 @@ final class AutoUpdater {
         case missingUpdater
     }
 
-    private let checkInterval: TimeInterval = 24 * 60 * 60
+    private let checkInterval: TimeInterval = 60 * 60
     private let versionURL = URL(
         string: "https://raw.githubusercontent.com/sekiyaoshen-blip/codex-quota-bar/main/Info.plist"
     )!
