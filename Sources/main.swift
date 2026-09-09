@@ -558,7 +558,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.3", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.4", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -1128,11 +1128,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func remainingText(until date: Date?) -> String {
         guard let date else { return "—" }
-        let hours = Int(ceil(date.timeIntervalSinceNow / 3_600))
-        guard hours > 0 else { return "即将重置" }
+        let interval = date.timeIntervalSinceNow
+        guard interval > 0 else { return "即将重置" }
+        if interval < 24 * 3_600 {
+            let totalMinutes = max(1, Int(interval / 60))
+            return "\(totalMinutes / 60) 小时 \(totalMinutes % 60) 分"
+        }
+
+        let hours = Int(ceil(interval / 3_600))
         let days = hours / 24
         let remainingHours = hours % 24
-        if days == 0 { return "\(remainingHours) 小时" }
         if remainingHours == 0 { return "\(days) 天" }
         return "\(days) 天 \(remainingHours) 小时"
     }
