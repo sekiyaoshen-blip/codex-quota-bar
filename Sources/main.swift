@@ -550,7 +550,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.1", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -841,16 +841,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let providerRootItem = NSMenuItem(title: "模型供应商：正在识别…", action: nil, keyEquivalent: "")
     private let providerStatusItem = NSMenuItem(title: "正在读取当前配置…", action: nil, keyEquivalent: "")
+    private let openAIQuotaTitleItem = NSMenuItem(title: "OpenAI 官方额度", action: nil, keyEquivalent: "")
     private let fiveHourItem = NSMenuItem(title: "5 小时额度：等待数据", action: nil, keyEquivalent: "")
     private let fiveResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let fiveHourSeparator = NSMenuItem.separator()
     private let weekItem = NSMenuItem(title: "一周额度：等待数据", action: nil, keyEquivalent: "")
     private let weekResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let resetCreditsItem = NSMenuItem(title: "剩余重置次数：等待数据", action: nil, keyEquivalent: "")
+    private let bailianQuotaTitleItem = NSMenuItem(title: "阿里百炼 Token Plan 额度", action: nil, keyEquivalent: "")
     private let bailianWeekItem = NSMenuItem(title: "百炼一周额度：等待数据", action: nil, keyEquivalent: "")
     private let bailianResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let quotaUnavailableItem = NSMenuItem(title: "DeepSeek 官方暂未提供套餐额度查询", action: nil, keyEquivalent: "")
-    private let updateItem = NSMenuItem(title: "正在连接 Codex…", action: nil, keyEquivalent: "")
+    private let openAIUpdateItem = NSMenuItem(title: "正在连接 OpenAI…", action: nil, keyEquivalent: "")
+    private let bailianUpdateItem = NSMenuItem(title: "正在连接百炼…", action: nil, keyEquivalent: "")
     private let waterReminderRootItem = NSMenuItem(title: "喝水提醒：已关闭", action: nil, keyEquivalent: "")
     private let waterReminderToggleItem = NSMenuItem(title: "开启喝水提醒", action: nil, keyEquivalent: "")
     private let nextWaterReminderItem = NSMenuItem(title: "下次提醒：—", action: nil, keyEquivalent: "")
@@ -861,6 +864,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastBailianUpdated: Date?
     private var currentProvider: CodexProvider?
     private var providerItems: [CodexProvider: NSMenuItem] = [:]
+    private var openAIHasError = false
+    private var bailianHasError = false
     private var waterReminderIntervalItems: [NSMenuItem] = []
     private var waterReminderTimer: Timer?
     private var nextWaterReminderDate: Date?
@@ -890,19 +895,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.renderCurrentQuota()
             if !isPartial { self.autoUpdater.checkIfNeeded() }
         }
-        client.onStateChange = { [weak self] state in
-            guard let self, self.currentProvider == nil || self.currentProvider == .official else { return }
-            self.render(state)
-        }
+        client.onStateChange = { [weak self] state in self?.render(state) }
         bailianClient.onSnapshot = { [weak self] snapshot in
             self?.latestBailianSnapshot = snapshot
             self?.lastBailianUpdated = Date()
             self?.renderCurrentQuota()
         }
-        bailianClient.onStateChange = { [weak self] state in
-            guard let self, self.currentProvider == .aliyun else { return }
-            self.render(state)
-        }
+        bailianClient.onStateChange = { [weak self] state in self?.render(state) }
         client.start()
         bailianClient.start()
         refreshCurrentProvider()
@@ -936,22 +935,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         configureProviderMenu()
         menu.addItem(providerRootItem)
+        menu.addItem(quotaUnavailableItem)
         menu.addItem(.separator())
 
-        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem,
-         bailianWeekItem, bailianResetItem, quotaUnavailableItem, updateItem].forEach { $0.isEnabled = false }
+        [openAIQuotaTitleItem, fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem,
+         bailianQuotaTitleItem, bailianWeekItem, bailianResetItem, quotaUnavailableItem,
+         openAIUpdateItem, bailianUpdateItem].forEach { $0.isEnabled = false }
+        menu.addItem(openAIQuotaTitleItem)
         menu.addItem(fiveHourItem)
         menu.addItem(fiveResetItem)
         menu.addItem(fiveHourSeparator)
         menu.addItem(weekItem)
         menu.addItem(weekResetItem)
-        menu.addItem(.separator())
         menu.addItem(resetCreditsItem)
+        menu.addItem(openAIUpdateItem)
+        menu.addItem(.separator())
+        menu.addItem(bailianQuotaTitleItem)
         menu.addItem(bailianWeekItem)
         menu.addItem(bailianResetItem)
-        menu.addItem(quotaUnavailableItem)
+        menu.addItem(bailianUpdateItem)
         menu.addItem(.separator())
-        menu.addItem(updateItem)
 
         let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: #selector(openUsagePage), keyEquivalent: "")
         usageItem.target = self
@@ -1023,46 +1026,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func renderCurrentQuota() {
         updateQuotaVisibility()
-        switch currentProvider {
-        case .official, nil:
-            if let latestSnapshot { render(latestSnapshot) }
-        case .aliyun:
-            if let latestBailianSnapshot { render(latestBailianSnapshot) }
-        case .deepseek:
-            statusItem.button?.title = "DeepSeek"
-            updateItem.title = "DeepSeek 官方暂无可读取的套餐额度"
-        }
+        if let latestSnapshot { render(latestSnapshot) }
+        if let latestBailianSnapshot { render(latestBailianSnapshot) }
+        updateStatusTitle()
     }
 
     private func updateQuotaVisibility() {
-        let showOfficial = currentProvider == nil || currentProvider == .official
-        let showBailian = currentProvider == .aliyun
-        let showDeepSeek = currentProvider == .deepseek
-        fiveHourItem.isHidden = !showOfficial || latestSnapshot?.fiveHour == nil
+        fiveHourItem.isHidden = latestSnapshot?.fiveHour == nil
         fiveResetItem.isHidden = fiveHourItem.isHidden
-        fiveHourSeparator.isHidden = !showOfficial
-            || latestSnapshot?.fiveHour == nil
+        fiveHourSeparator.isHidden = latestSnapshot?.fiveHour == nil
             || latestSnapshot?.weekly == nil
-        weekItem.isHidden = !showOfficial || latestSnapshot?.weekly == nil
+        weekItem.isHidden = latestSnapshot?.weekly == nil
         weekResetItem.isHidden = weekItem.isHidden
-        resetCreditsItem.isHidden = !showOfficial
-        bailianWeekItem.isHidden = !showBailian
-        bailianResetItem.isHidden = !showBailian
-        quotaUnavailableItem.isHidden = !showDeepSeek
+        quotaUnavailableItem.isHidden = currentProvider != .deepseek
+    }
+
+    private func updateStatusTitle() {
+        let openAIText: String
+        if let snapshot = latestSnapshot {
+            let percentages = [snapshot.fiveHour, snapshot.weekly]
+                .compactMap { $0?.remainingPercent }
+                .map(String.init)
+            openAIText = percentages.isEmpty ? "O —" : "O \(percentages.joined(separator: "/"))%"
+        } else {
+            openAIText = openAIHasError ? "O ⚠︎" : "O …"
+        }
+
+        let bailianText: String
+        if let snapshot = latestBailianSnapshot {
+            bailianText = "B \(percentText(snapshot.remainingPercent))%"
+        } else {
+            bailianText = bailianHasError ? "B ⚠︎" : "B …"
+        }
+        let resets = latestSnapshot?.resetCreditsCount.map(String.init) ?? "—"
+        statusItem.button?.title = "\(openAIText)·\(bailianText)·↻\(resets)"
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
-        var statusParts: [String] = []
-        if let fiveHour = snapshot.fiveHour {
-            statusParts.append("\(fiveHour.remainingPercent)%")
-        }
-        if let weekly = snapshot.weekly {
-            statusParts.append("\(weekly.remainingPercent)%")
-        }
-        let resets = snapshot.resetCreditsCount.map(String.init) ?? "—"
-        statusParts.append("↻\(resets)")
-        statusItem.button?.title = statusParts.joined(separator: "·")
-
         updateQuotaVisibility()
         fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.fiveHour)
         fiveResetItem.title = "重置时间：\(resetText(snapshot.fiveHour?.resetsAt))"
@@ -1073,48 +1073,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             resetCreditsItem.title = "剩余重置次数：未提供"
         }
-        updateItem.title = "刚刚更新 · 每 1 分钟自动刷新"
+        openAIHasError = false
+        openAIUpdateItem.title = "刚刚更新 · 每 1 分钟自动刷新"
+        updateStatusTitle()
     }
 
     private func render(_ snapshot: BailianPlanSnapshot) {
         let remaining = percentText(snapshot.remainingPercent)
         let used = percentText(snapshot.usedPercent)
-        statusItem.button?.title = "百炼·\(remaining)%"
         bailianWeekItem.title = "百炼一周额度：剩余 \(remaining)% · 已用 \(used)%"
         bailianResetItem.title = "重置时间：\(resetText(snapshot.resetsAt))"
-        updateItem.title = "刚刚更新 · 每 5 分钟自动刷新"
+        bailianHasError = false
+        bailianUpdateItem.title = "刚刚更新 · 每 5 分钟自动刷新"
+        updateStatusTitle()
     }
 
     private func render(_ state: CodexRateLimitClient.State) {
         switch state {
         case .starting:
-            if latestSnapshot == nil { statusItem.button?.title = "…·↻—" }
-            updateItem.title = "正在读取 Codex 额度…"
+            openAIUpdateItem.title = "正在读取 OpenAI 额度…"
         case .ready:
             if let lastUpdated {
-                updateItem.title = "上次更新：\(timeFormatter.string(from: lastUpdated)) · 每 1 分钟"
+                openAIUpdateItem.title = "上次更新：\(timeFormatter.string(from: lastUpdated)) · 每 1 分钟"
             } else {
-                updateItem.title = "正在读取额度…"
+                openAIUpdateItem.title = "正在读取 OpenAI 额度…"
             }
         case .error(let message):
-            updateItem.title = message
-            if latestSnapshot == nil { statusItem.button?.title = "⚠︎" }
+            openAIHasError = true
+            openAIUpdateItem.title = message
         }
+        updateStatusTitle()
     }
 
     private func render(_ state: BailianPlanUsageClient.State) {
         switch state {
         case .starting:
-            if latestBailianSnapshot == nil { statusItem.button?.title = "百炼·…" }
-            updateItem.title = "正在读取百炼 Token Plan 额度…"
+            bailianUpdateItem.title = "正在读取百炼 Token Plan 额度…"
         case .ready:
             if let lastBailianUpdated {
-                updateItem.title = "上次更新：\(timeFormatter.string(from: lastBailianUpdated)) · 每 5 分钟"
+                bailianUpdateItem.title = "上次更新：\(timeFormatter.string(from: lastBailianUpdated)) · 每 5 分钟"
             }
         case .error(let message):
-            updateItem.title = concise(message)
-            if latestBailianSnapshot == nil { statusItem.button?.title = "百炼·⚠︎" }
+            bailianHasError = true
+            bailianUpdateItem.title = concise(message)
         }
+        updateStatusTitle()
     }
 
     private func percentText(_ value: Double) -> String {
