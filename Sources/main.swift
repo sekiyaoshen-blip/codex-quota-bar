@@ -16,6 +16,236 @@ struct RateLimitSnapshot {
     let resetCreditsCount: Int?
 }
 
+enum CodexProvider: String, CaseIterable {
+    case official
+    case deepseek
+    case aliyun
+
+    var displayName: String {
+        switch self {
+        case .official: return "OpenAI 官方"
+        case .deepseek: return "DeepSeek 官方"
+        case .aliyun: return "阿里百炼 Token Plan"
+        }
+    }
+}
+
+struct BailianPlanSnapshot {
+    let usedPercent: Double
+    let resetsAt: Date?
+
+    var remainingPercent: Double { max(0, 100 - usedPercent) }
+}
+
+enum LocalExecutable {
+    static func find(_ name: String) -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let standardDirectories = [
+            home.appendingPathComponent(".local/share/mise/shims", isDirectory: true),
+            home.appendingPathComponent(".local/bin", isDirectory: true),
+            URL(fileURLWithPath: "/opt/homebrew/bin", isDirectory: true),
+            URL(fileURLWithPath: "/usr/local/bin", isDirectory: true),
+            URL(fileURLWithPath: "/usr/bin", isDirectory: true),
+            URL(fileURLWithPath: "/bin", isDirectory: true)
+        ]
+        let pathDirectories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { URL(fileURLWithPath: String($0), isDirectory: true) }
+        for directory in pathDirectories + standardDirectories {
+            let candidate = directory.appendingPathComponent(name)
+            if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+}
+
+final class CodexProviderSwitcher {
+    enum SwitchError: LocalizedError {
+        case missingScript
+        case failed(String)
+        case invalidStatus
+
+        var errorDescription: String? {
+            switch self {
+            case .missingScript: return "未找到 model-switch 切换脚本"
+            case .failed(let message): return message
+            case .invalidStatus: return "无法识别当前模型供应商"
+            }
+        }
+    }
+
+    private let queue = DispatchQueue(label: "com.seki.codexquotabar.provider-switcher")
+
+    func refresh(completion: @escaping (Result<CodexProvider, Error>) -> Void) {
+        run(command: "status") { result in
+            completion(result.flatMap { output in
+                for rawLine in output.split(separator: "\n") {
+                    let line = String(rawLine)
+                    guard line.contains("模型 provider"), let colon = line.firstIndex(of: ":") else { continue }
+                    let value = line[line.index(after: colon)...]
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let provider = CodexProvider(rawValue: value) { return .success(provider) }
+                }
+                return .failure(SwitchError.invalidStatus)
+            })
+        }
+    }
+
+    func activate(_ provider: CodexProvider, completion: @escaping (Result<Void, Error>) -> Void) {
+        run(command: provider.rawValue) { result in completion(result.map { _ in () }) }
+    }
+
+    private func run(command: String, completion: @escaping (Result<String, Error>) -> Void) {
+        queue.async {
+            guard let script = self.scriptURL() else {
+                DispatchQueue.main.async { completion(.failure(SwitchError.missingScript)) }
+                return
+            }
+
+            let process = Process()
+            let output = Pipe()
+            let errors = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [script.path, command]
+            process.standardOutput = output
+            process.standardError = errors
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let stdout = String(
+                    data: output.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                let stderr = String(
+                    data: errors.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                let result: Result<String, Error>
+                if process.terminationStatus == 0 {
+                    result = .success(stdout)
+                } else {
+                    let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    result = .failure(SwitchError.failed(message.isEmpty ? "切换失败" : message))
+                }
+                DispatchQueue.main.async { completion(result) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
+
+    private func scriptURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let codexHome: URL
+        if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
+            codexHome = URL(fileURLWithPath: configured, isDirectory: true)
+        } else {
+            codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        }
+        let script = codexHome
+            .appendingPathComponent("skills/model-switch/scripts/codex-switch.sh")
+        return FileManager.default.isReadableFile(atPath: script.path) ? script : nil
+    }
+}
+
+final class BailianPlanUsageClient {
+    enum State {
+        case starting
+        case ready
+        case error(String)
+    }
+
+    var onSnapshot: ((BailianPlanSnapshot) -> Void)?
+    var onStateChange: ((State) -> Void)?
+
+    private let queue = DispatchQueue(label: "com.seki.codexquotabar.bailian-usage")
+    private var refreshTimer: DispatchSourceTimer?
+    private var requestInFlight = false
+    private var stopped = false
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self, self.refreshTimer == nil else { return }
+            self.stopped = false
+            self.publishState(.starting)
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 5 * 60, repeating: 5 * 60, leeway: .seconds(5))
+            timer.setEventHandler { [weak self] in self?.requestUsage() }
+            timer.resume()
+            self.refreshTimer = timer
+            self.requestUsage()
+        }
+    }
+
+    func refresh() {
+        queue.async { [weak self] in self?.requestUsage() }
+    }
+
+    func stop() {
+        queue.sync {
+            stopped = true
+            refreshTimer?.cancel()
+            refreshTimer = nil
+        }
+    }
+
+    private func requestUsage() {
+        guard !stopped, !requestInFlight else { return }
+        requestInFlight = true
+        guard let executable = LocalExecutable.find("bl") else {
+            requestInFlight = false
+            publishState(.error("未找到百炼 CLI（bl）"))
+            return
+        }
+
+        let process = Process()
+        let output = Pipe()
+        let errors = Pipe()
+        process.executableURL = executable
+        process.arguments = ["usage", "token-plan", "--output", "json"]
+        process.standardOutput = output
+        process.standardError = errors
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let stdout = output.fileHandleForReading.readDataToEndOfFile()
+            let stderr = String(
+                data: errors.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            requestInFlight = false
+            guard process.terminationStatus == 0 else {
+                let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                publishState(.error(message.isEmpty ? "百炼额度读取失败" : message))
+                return
+            }
+            guard let object = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any],
+                  let fraction = (object["per1WeekPercentage"] as? NSNumber)?.doubleValue else {
+                publishState(.error("百炼额度数据格式已变化"))
+                return
+            }
+            let resetMilliseconds = (object["per1WeekResetTime"] as? NSNumber)?.doubleValue
+            let snapshot = BailianPlanSnapshot(
+                usedPercent: min(100, max(0, fraction * 100)),
+                resetsAt: resetMilliseconds.map { Date(timeIntervalSince1970: $0 / 1_000) }
+            )
+            publishSnapshot(snapshot)
+            publishState(.ready)
+        } catch {
+            requestInFlight = false
+            publishState(.error(error.localizedDescription))
+        }
+    }
+
+    private func publishSnapshot(_ snapshot: BailianPlanSnapshot) {
+        DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot) }
+    }
+
+    private func publishState(_ state: State) {
+        DispatchQueue.main.async { [weak self] in self?.onStateChange?(state) }
+    }
+}
+
 final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _ session: URLSession,
@@ -320,7 +550,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.3.7", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.0", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -605,21 +835,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private let client = CodexRateLimitClient()
+    private let bailianClient = BailianPlanUsageClient()
+    private let providerSwitcher = CodexProviderSwitcher()
     private let autoUpdater = AutoUpdater()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let providerRootItem = NSMenuItem(title: "模型供应商：正在识别…", action: nil, keyEquivalent: "")
+    private let providerStatusItem = NSMenuItem(title: "正在读取当前配置…", action: nil, keyEquivalent: "")
     private let fiveHourItem = NSMenuItem(title: "5 小时额度：等待数据", action: nil, keyEquivalent: "")
     private let fiveResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let fiveHourSeparator = NSMenuItem.separator()
     private let weekItem = NSMenuItem(title: "一周额度：等待数据", action: nil, keyEquivalent: "")
     private let weekResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
     private let resetCreditsItem = NSMenuItem(title: "剩余重置次数：等待数据", action: nil, keyEquivalent: "")
+    private let bailianWeekItem = NSMenuItem(title: "百炼一周额度：等待数据", action: nil, keyEquivalent: "")
+    private let bailianResetItem = NSMenuItem(title: "重置时间：—", action: nil, keyEquivalent: "")
+    private let quotaUnavailableItem = NSMenuItem(title: "DeepSeek 官方暂未提供套餐额度查询", action: nil, keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "正在连接 Codex…", action: nil, keyEquivalent: "")
     private let waterReminderRootItem = NSMenuItem(title: "喝水提醒：已关闭", action: nil, keyEquivalent: "")
     private let waterReminderToggleItem = NSMenuItem(title: "开启喝水提醒", action: nil, keyEquivalent: "")
     private let nextWaterReminderItem = NSMenuItem(title: "下次提醒：—", action: nil, keyEquivalent: "")
     private let hydrationOverlay = HydrationOverlayController()
     private var latestSnapshot: RateLimitSnapshot?
+    private var latestBailianSnapshot: BailianPlanSnapshot?
     private var lastUpdated: Date?
+    private var lastBailianUpdated: Date?
+    private var currentProvider: CodexProvider?
+    private var providerItems: [CodexProvider: NSMenuItem] = [:]
     private var waterReminderIntervalItems: [NSMenuItem] = []
     private var waterReminderTimer: Timer?
     private var nextWaterReminderDate: Date?
@@ -646,11 +887,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.latestSnapshot = merged
             self.lastUpdated = Date()
-            self.render(merged)
+            self.renderCurrentQuota()
             if !isPartial { self.autoUpdater.checkIfNeeded() }
         }
-        client.onStateChange = { [weak self] state in self?.render(state) }
+        client.onStateChange = { [weak self] state in
+            guard let self, self.currentProvider == nil || self.currentProvider == .official else { return }
+            self.render(state)
+        }
+        bailianClient.onSnapshot = { [weak self] snapshot in
+            self?.latestBailianSnapshot = snapshot
+            self?.lastBailianUpdated = Date()
+            self?.renderCurrentQuota()
+        }
+        bailianClient.onStateChange = { [weak self] state in
+            guard let self, self.currentProvider == .aliyun else { return }
+            self.render(state)
+        }
         client.start()
+        bailianClient.start()
+        refreshCurrentProvider()
         if waterReminderEnabled {
             resetWaterReminderSchedule()
         }
@@ -661,6 +916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hydrationOverlay.stop()
         autoUpdater.stop()
         client.stop()
+        bailianClient.stop()
     }
 
     private func configureStatusItem() {
@@ -668,7 +924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.isVisible = true
         guard let button = statusItem.button else { return }
         button.title = "…·↻—"
-        button.toolTip = "Codex 剩余额度"
+        button.toolTip = "Codex 模型与剩余额度"
     }
 
     private func configureMenu() {
@@ -678,7 +934,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(title)
         menu.addItem(.separator())
 
-        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem, updateItem].forEach { $0.isEnabled = false }
+        configureProviderMenu()
+        menu.addItem(providerRootItem)
+        menu.addItem(.separator())
+
+        [fiveHourItem, fiveResetItem, weekItem, weekResetItem, resetCreditsItem,
+         bailianWeekItem, bailianResetItem, quotaUnavailableItem, updateItem].forEach { $0.isEnabled = false }
         menu.addItem(fiveHourItem)
         menu.addItem(fiveResetItem)
         menu.addItem(fiveHourSeparator)
@@ -686,6 +947,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(weekResetItem)
         menu.addItem(.separator())
         menu.addItem(resetCreditsItem)
+        menu.addItem(bailianWeekItem)
+        menu.addItem(bailianResetItem)
+        menu.addItem(quotaUnavailableItem)
         menu.addItem(.separator())
         menu.addItem(updateItem)
 
@@ -707,6 +971,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+        updateQuotaVisibility()
+    }
+
+    private func configureProviderMenu() {
+        let submenu = NSMenu(title: "模型供应商")
+        providerItems = Dictionary(uniqueKeysWithValues: CodexProvider.allCases.enumerated().map { index, provider in
+            let item = NSMenuItem(
+                title: provider.displayName,
+                action: #selector(selectProvider(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = index
+            submenu.addItem(item)
+            return (provider, item)
+        })
+        submenu.addItem(.separator())
+        providerStatusItem.isEnabled = false
+        submenu.addItem(providerStatusItem)
+        providerRootItem.submenu = submenu
     }
 
     private func configureWaterReminderMenu() {
@@ -737,6 +1021,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateWaterReminderMenu()
     }
 
+    private func renderCurrentQuota() {
+        updateQuotaVisibility()
+        switch currentProvider {
+        case .official, nil:
+            if let latestSnapshot { render(latestSnapshot) }
+        case .aliyun:
+            if let latestBailianSnapshot { render(latestBailianSnapshot) }
+        case .deepseek:
+            statusItem.button?.title = "DeepSeek"
+            updateItem.title = "DeepSeek 官方暂无可读取的套餐额度"
+        }
+    }
+
+    private func updateQuotaVisibility() {
+        let showOfficial = currentProvider == nil || currentProvider == .official
+        let showBailian = currentProvider == .aliyun
+        let showDeepSeek = currentProvider == .deepseek
+        fiveHourItem.isHidden = !showOfficial || latestSnapshot?.fiveHour == nil
+        fiveResetItem.isHidden = fiveHourItem.isHidden
+        fiveHourSeparator.isHidden = !showOfficial
+            || latestSnapshot?.fiveHour == nil
+            || latestSnapshot?.weekly == nil
+        weekItem.isHidden = !showOfficial || latestSnapshot?.weekly == nil
+        weekResetItem.isHidden = weekItem.isHidden
+        resetCreditsItem.isHidden = !showOfficial
+        bailianWeekItem.isHidden = !showBailian
+        bailianResetItem.isHidden = !showBailian
+        quotaUnavailableItem.isHidden = !showDeepSeek
+    }
+
     private func render(_ snapshot: RateLimitSnapshot) {
         var statusParts: [String] = []
         if let fiveHour = snapshot.fiveHour {
@@ -749,11 +1063,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusParts.append("↻\(resets)")
         statusItem.button?.title = statusParts.joined(separator: "·")
 
-        fiveHourItem.isHidden = snapshot.fiveHour == nil
-        fiveResetItem.isHidden = snapshot.fiveHour == nil
-        fiveHourSeparator.isHidden = snapshot.fiveHour == nil || snapshot.weekly == nil
-        weekItem.isHidden = snapshot.weekly == nil
-        weekResetItem.isHidden = snapshot.weekly == nil
+        updateQuotaVisibility()
         fiveHourItem.title = detailTitle(label: "5 小时额度", window: snapshot.fiveHour)
         fiveResetItem.title = "重置时间：\(resetText(snapshot.fiveHour?.resetsAt))"
         weekItem.title = detailTitle(label: "一周额度", window: snapshot.weekly)
@@ -764,6 +1074,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             resetCreditsItem.title = "剩余重置次数：未提供"
         }
         updateItem.title = "刚刚更新 · 每 1 分钟自动刷新"
+    }
+
+    private func render(_ snapshot: BailianPlanSnapshot) {
+        let remaining = percentText(snapshot.remainingPercent)
+        let used = percentText(snapshot.usedPercent)
+        statusItem.button?.title = "百炼·\(remaining)%"
+        bailianWeekItem.title = "百炼一周额度：剩余 \(remaining)% · 已用 \(used)%"
+        bailianResetItem.title = "重置时间：\(resetText(snapshot.resetsAt))"
+        updateItem.title = "刚刚更新 · 每 5 分钟自动刷新"
     }
 
     private func render(_ state: CodexRateLimitClient.State) {
@@ -781,6 +1100,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateItem.title = message
             if latestSnapshot == nil { statusItem.button?.title = "⚠︎" }
         }
+    }
+
+    private func render(_ state: BailianPlanUsageClient.State) {
+        switch state {
+        case .starting:
+            if latestBailianSnapshot == nil { statusItem.button?.title = "百炼·…" }
+            updateItem.title = "正在读取百炼 Token Plan 额度…"
+        case .ready:
+            if let lastBailianUpdated {
+                updateItem.title = "上次更新：\(timeFormatter.string(from: lastBailianUpdated)) · 每 5 分钟"
+            }
+        case .error(let message):
+            updateItem.title = concise(message)
+            if latestBailianSnapshot == nil { statusItem.button?.title = "百炼·⚠︎" }
+        }
+    }
+
+    private func percentText(_ value: Double) -> String {
+        if value >= 99.95 || value.rounded() == value { return String(format: "%.0f", value) }
+        return String(format: "%.1f", value)
+    }
+
+    private func concise(_ message: String, limit: Int = 90) -> String {
+        let normalized = message
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "操作失败"
+        return normalized.count <= limit ? normalized : String(normalized.prefix(limit)) + "…"
     }
 
     private func detailTitle(label: String, window: RateLimitWindow?) -> String {
@@ -919,6 +1267,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hydrationOverlay.show(duration: 30) { [weak self] in
             self?.updateWaterReminderMenu()
+        }
+    }
+
+    private func refreshCurrentProvider() {
+        providerSwitcher.refresh { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let provider):
+                self.currentProvider = provider
+                self.providerStatusItem.title = "当前：\(provider.displayName)"
+            case .failure(let error):
+                self.providerStatusItem.title = self.concise(error.localizedDescription)
+            }
+            self.updateProviderMenu()
+            self.renderCurrentQuota()
+        }
+    }
+
+    private func updateProviderMenu(isSwitching: Bool = false) {
+        let title = currentProvider?.displayName ?? "无法识别"
+        providerRootItem.title = "模型供应商：\(title)"
+        providerItems.forEach { provider, item in
+            item.state = provider == currentProvider ? .on : .off
+            item.isEnabled = !isSwitching
+        }
+    }
+
+    @objc private func selectProvider(_ sender: NSMenuItem) {
+        guard CodexProvider.allCases.indices.contains(sender.tag) else { return }
+        let provider = CodexProvider.allCases[sender.tag]
+        guard provider != currentProvider else {
+            providerStatusItem.title = "当前已是 \(provider.displayName)"
+            return
+        }
+
+        providerStatusItem.title = "正在切换到 \(provider.displayName)…"
+        updateProviderMenu(isSwitching: true)
+        providerSwitcher.activate(provider) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.currentProvider = provider
+                self.providerStatusItem.title = "已切换，正在重启 Codex…"
+                self.updateProviderMenu()
+                self.renderCurrentQuota()
+                if provider == .aliyun { self.bailianClient.refresh() }
+                self.restartCodexIfRunning()
+            case .failure(let error):
+                self.providerStatusItem.title = "切换失败：\(self.concise(error.localizedDescription, limit: 70))"
+                self.updateProviderMenu()
+            }
+        }
+    }
+
+    private func restartCodexIfRunning() {
+        let bundleIdentifier = "com.openai.codex"
+        let applications = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        guard !applications.isEmpty else {
+            providerStatusItem.title = "切换完成；下次打开 Codex 时生效"
+            return
+        }
+        applications.forEach { $0.terminate() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+                self?.providerStatusItem.title = "切换完成；请手动重开 Codex"
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { _, error in
+                DispatchQueue.main.async {
+                    self?.providerStatusItem.title = error == nil
+                        ? "切换完成，Codex 已重启"
+                        : "切换完成；请手动重开 Codex"
+                }
+            }
         }
     }
 
