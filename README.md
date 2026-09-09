@@ -12,7 +12,7 @@
 - 喝水时显示 30 秒置顶倒计时。
 - 跟随 ChatGPT/Codex 自动启动。
 - 可用 `codex-quota-bar` 或 `codex-bar` 命令启动或重启应用。
-- 菜单中可打开 Codex 用量页面。
+- 菜单中可打开 Codex 用量页面和 Tibo 的 X 主页。
 
 ## 安装与更新
 

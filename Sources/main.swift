@@ -558,7 +558,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.3", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -957,6 +957,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usageItem.target = self
         menu.addItem(usageItem)
 
+        let tiboItem = NSMenuItem(title: "打开 Tibo 的 X 主页", action: #selector(openTiboProfile), keyEquivalent: "")
+        tiboItem.target = self
+        menu.addItem(tiboItem)
+
         menu.addItem(.separator())
 
         configureWaterReminderMenu()
@@ -1341,6 +1345,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openUsagePage() {
         if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openTiboProfile() {
+        if let url = URL(string: "https://x.com/thsottiaux") {
             NSWorkspace.shared.open(url)
         }
     }
