@@ -45,6 +45,11 @@ struct BailianPlanSnapshot {
     var remainingPercent: Double { max(0, 100 - usedPercent) }
 }
 
+struct CodexProviderStatus {
+    let current: CodexProvider
+    let available: Set<CodexProvider>
+}
+
 enum LocalExecutable {
     static func find(_ name: String) -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -84,17 +89,30 @@ final class CodexProviderSwitcher {
 
     private let queue = DispatchQueue(label: "com.seki.codexquotabar.provider-switcher")
 
-    func refresh(completion: @escaping (Result<CodexProvider, Error>) -> Void) {
+    func refresh(completion: @escaping (Result<CodexProviderStatus, Error>) -> Void) {
         run(command: "status") { result in
             completion(result.flatMap { output in
+                var current: CodexProvider?
                 for rawLine in output.split(separator: "\n") {
                     let line = String(rawLine)
                     guard line.contains("模型 provider"), let colon = line.firstIndex(of: ":") else { continue }
                     let value = line[line.index(after: colon)...]
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let provider = CodexProvider(rawValue: value) { return .success(provider) }
+                    current = CodexProvider(rawValue: value)
+                    if current != nil { break }
                 }
-                return .failure(SwitchError.invalidStatus)
+                guard let current else { return .failure(SwitchError.invalidStatus) }
+
+                var available: Set<CodexProvider> = [.official, current]
+                if output.contains("DeepSeek vault: 已保存密钥")
+                    || output.contains("有 OPENAI_API_KEY")
+                    || !(ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] ?? "").isEmpty {
+                    available.insert(.deepseek)
+                }
+                if self.hasCredential(named: "deepseek-aliyun-key") {
+                    available.insert(.aliyun)
+                }
+                return .success(CodexProviderStatus(current: current, available: available))
             })
         }
     }
@@ -143,16 +161,24 @@ final class CodexProviderSwitcher {
     }
 
     private func scriptURL() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let codexHome: URL
-        if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
-            codexHome = URL(fileURLWithPath: configured, isDirectory: true)
-        } else {
-            codexHome = home.appendingPathComponent(".codex", isDirectory: true)
-        }
-        let script = codexHome
+        let script = codexHomeURL()
             .appendingPathComponent("skills/model-switch/scripts/codex-switch.sh")
         return FileManager.default.isReadableFile(atPath: script.path) ? script : nil
+    }
+
+    private func codexHomeURL() -> URL {
+        if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
+            return URL(fileURLWithPath: configured, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+    }
+
+    private func hasCredential(named name: String) -> Bool {
+        let url = codexHomeURL().appendingPathComponent("codex-switch/\(name)")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else { return false }
+        return size.int64Value > 0
     }
 }
 
@@ -558,7 +584,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.4", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.5", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -849,6 +875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let providerRootItem = NSMenuItem(title: "当前模型：正在识别…", action: nil, keyEquivalent: "")
     private let providerStatusItem = NSMenuItem(title: "正在读取当前配置…", action: nil, keyEquivalent: "")
+    private let providerSectionSeparatorItem = NSMenuItem.separator()
     private let openAIQuotaTitleItem = NSMenuItem(title: "OpenAI", action: nil, keyEquivalent: "")
     private let fiveHourItem = NSMenuItem(title: "5 小时：等待数据", action: nil, keyEquivalent: "")
     private let weekItem = NSMenuItem(title: "一周：等待数据", action: nil, keyEquivalent: "")
@@ -857,6 +884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let bailianWeekItem = NSMenuItem(title: "一周：等待数据", action: nil, keyEquivalent: "")
     private let quotaUnavailableItem = NSMenuItem(title: "DeepSeek 暂无额度数据", action: nil, keyEquivalent: "")
     private let openAIUpdateItem = NSMenuItem(title: "OpenAI：读取中…", action: nil, keyEquivalent: "")
+    private let bailianSectionSeparatorItem = NSMenuItem.separator()
     private let bailianUpdateItem = NSMenuItem(title: "百炼：读取中…", action: nil, keyEquivalent: "")
     private let waterReminderRootItem = NSMenuItem(title: "喝水提醒：已关闭", action: nil, keyEquivalent: "")
     private let waterReminderToggleItem = NSMenuItem(title: "开启喝水提醒", action: nil, keyEquivalent: "")
@@ -865,6 +893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestSnapshot: RateLimitSnapshot?
     private var latestBailianSnapshot: BailianPlanSnapshot?
     private var currentProvider: CodexProvider?
+    private var availableProviders: Set<CodexProvider> = [.official]
     private var providerItems: [CodexProvider: NSMenuItem] = [:]
     private var openAIHasError = false
     private var bailianHasError = false
@@ -937,7 +966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureProviderMenu()
         menu.addItem(providerRootItem)
         menu.addItem(quotaUnavailableItem)
-        menu.addItem(.separator())
+        menu.addItem(providerSectionSeparatorItem)
 
         [openAIQuotaTitleItem, fiveHourItem, weekItem, resetCreditsItem,
          bailianQuotaTitleItem, bailianWeekItem, quotaUnavailableItem,
@@ -947,7 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(weekItem)
         menu.addItem(resetCreditsItem)
         menu.addItem(openAIUpdateItem)
-        menu.addItem(.separator())
+        menu.addItem(bailianSectionSeparatorItem)
         menu.addItem(bailianQuotaTitleItem)
         menu.addItem(bailianWeekItem)
         menu.addItem(bailianUpdateItem)
@@ -972,6 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+        updateProviderMenu()
         updateQuotaVisibility()
     }
 
@@ -1029,10 +1059,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateQuotaVisibility() {
+        let showBailian = availableProviders.contains(.aliyun) || latestBailianSnapshot != nil
         fiveHourItem.isHidden = latestSnapshot?.fiveHour == nil
         weekItem.isHidden = latestSnapshot?.weekly == nil
         openAIUpdateItem.isHidden = latestSnapshot != nil && !openAIHasError
-        bailianUpdateItem.isHidden = latestBailianSnapshot != nil && !bailianHasError
+        bailianSectionSeparatorItem.isHidden = !showBailian
+        bailianQuotaTitleItem.isHidden = !showBailian
+        bailianWeekItem.isHidden = !showBailian
+        bailianUpdateItem.isHidden = !showBailian || (latestBailianSnapshot != nil && !bailianHasError)
         quotaUnavailableItem.isHidden = currentProvider != .deepseek
     }
 
@@ -1047,14 +1081,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openAIText = openAIHasError ? "O ⚠︎" : "O …"
         }
 
-        let bailianText: String
-        if let snapshot = latestBailianSnapshot {
-            bailianText = "B \(percentText(snapshot.remainingPercent))%"
-        } else {
-            bailianText = bailianHasError ? "B ⚠︎" : "B …"
+        var parts = [openAIText]
+        if availableProviders.contains(.aliyun) || latestBailianSnapshot != nil {
+            let bailianText: String
+            if let snapshot = latestBailianSnapshot {
+                bailianText = "B \(percentText(snapshot.remainingPercent))%"
+            } else {
+                bailianText = bailianHasError ? "B ⚠︎" : "B …"
+            }
+            parts.append(bailianText)
         }
         let resets = latestSnapshot?.resetCreditsCount.map(String.init) ?? "—"
-        statusItem.button?.title = "\(openAIText)·\(bailianText)·↻\(resets)"
+        parts.append("↻\(resets)")
+        statusItem.button?.title = parts.joined(separator: "·")
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
@@ -1272,8 +1311,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         providerSwitcher.refresh { [weak self] result in
             guard let self else { return }
             switch result {
-            case .success(let provider):
-                self.currentProvider = provider
+            case .success(let status):
+                self.currentProvider = status.current
+                self.availableProviders = status.available
                 self.providerStatusItem.isHidden = true
             case .failure(let error):
                 self.providerStatusItem.title = self.concise(error.localizedDescription)
@@ -1287,9 +1327,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateProviderMenu(isSwitching: Bool = false) {
         let title = currentProvider?.menuName ?? "无法识别"
         providerRootItem.title = "当前模型：\(title)"
+        let showProviderSwitcher = availableProviders.count > 1
+        providerRootItem.isHidden = !showProviderSwitcher
+        providerSectionSeparatorItem.isHidden = !showProviderSwitcher
         providerItems.forEach { provider, item in
             item.state = provider == currentProvider ? .on : .off
             item.isEnabled = !isSwitching
+            item.isHidden = !availableProviders.contains(provider)
         }
     }
 
@@ -1309,6 +1353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch result {
             case .success:
                 self.currentProvider = provider
+                self.availableProviders.insert(provider)
                 self.providerStatusItem.isHidden = true
                 self.updateProviderMenu()
                 self.renderCurrentQuota()
