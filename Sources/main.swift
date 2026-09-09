@@ -584,7 +584,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.5", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.6", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -1071,29 +1071,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusTitle() {
-        let openAIText: String
-        if let snapshot = latestSnapshot {
-            let percentages = [snapshot.fiveHour, snapshot.weekly]
-                .compactMap { $0?.remainingPercent }
-                .map(String.init)
-            openAIText = percentages.isEmpty ? "O —" : "O \(percentages.joined(separator: "/"))%"
-        } else {
-            openAIText = openAIHasError ? "O ⚠︎" : "O …"
-        }
-
-        var parts = [openAIText]
-        if availableProviders.contains(.aliyun) || latestBailianSnapshot != nil {
-            let bailianText: String
+        switch currentProvider {
+        case .aliyun:
             if let snapshot = latestBailianSnapshot {
-                bailianText = "B \(percentText(snapshot.remainingPercent))%"
+                statusItem.button?.title = "\(percentText(snapshot.remainingPercent))%"
             } else {
-                bailianText = bailianHasError ? "B ⚠︎" : "B …"
+                statusItem.button?.title = bailianHasError ? "⚠︎" : "…"
             }
-            parts.append(bailianText)
+        case .deepseek:
+            statusItem.button?.title = "DeepSeek"
+        case .official, nil:
+            let openAIText: String
+            if let snapshot = latestSnapshot {
+                let percentages = [snapshot.fiveHour, snapshot.weekly]
+                    .compactMap { $0?.remainingPercent }
+                    .map(String.init)
+                openAIText = percentages.isEmpty ? "—" : "\(percentages.joined(separator: "/"))%"
+            } else {
+                openAIText = openAIHasError ? "⚠︎" : "…"
+            }
+            let resets = latestSnapshot?.resetCreditsCount.map(String.init) ?? "—"
+            statusItem.button?.title = "\(openAIText)·↻\(resets)"
         }
-        let resets = latestSnapshot?.resetCreditsCount.map(String.init) ?? "—"
-        parts.append("↻\(resets)")
-        statusItem.button?.title = parts.joined(separator: "·")
     }
 
     private func render(_ snapshot: RateLimitSnapshot) {
