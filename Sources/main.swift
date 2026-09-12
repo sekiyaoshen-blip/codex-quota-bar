@@ -249,6 +249,9 @@ final class BailianPlanUsageClient {
         let errors = Pipe()
         process.executableURL = executable
         process.arguments = ["usage", "token-plan", "--output", "json"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["NO_COLOR"] = "1"
+        process.environment = environment
         process.standardOutput = output
         process.standardError = errors
         do {
@@ -261,7 +264,7 @@ final class BailianPlanUsageClient {
             ) ?? ""
             requestInFlight = false
             guard process.terminationStatus == 0 else {
-                let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                let message = Self.readableErrorMessage(from: stderr)
                 publishState(.error(message.isEmpty ? "百炼额度读取失败" : message))
                 return
             }
@@ -281,6 +284,35 @@ final class BailianPlanUsageClient {
             requestInFlight = false
             publishState(.error(error.localizedDescription))
         }
+    }
+
+    static func readableErrorMessage(from stderr: String) -> String {
+        if let openingBrace = stderr.firstIndex(of: "{"),
+           let closingBrace = stderr.lastIndex(of: "}"),
+           openingBrace <= closingBrace {
+            let jsonText = String(stderr[openingBrace...closingBrace])
+            if let data = jsonText.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = object["error"] as? [String: Any] {
+                let code = (error["code"] as? NSNumber)?.intValue
+                let message = (error["message"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if code == 3 || message.localizedCaseInsensitiveContains("not logged in")
+                    || message.localizedCaseInsensitiveContains("expired") {
+                    return "登录已过期，请重新登录"
+                }
+                if !message.isEmpty { return message }
+            }
+        }
+
+        return stderr
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter {
+                !$0.isEmpty && $0 != "{" && $0 != "}"
+                    && !$0.hasPrefix("(node:") && !$0.hasPrefix("(Use `node")
+            }
+            .last ?? ""
     }
 
     private func publishSnapshot(_ snapshot: BailianPlanSnapshot) {
@@ -596,7 +628,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.8", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.9", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -1259,7 +1291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateWaterReminderMenu() {
         waterReminderRootItem.title = waterReminderEnabled ? "喝水提醒：已开启" : "喝水提醒：已关闭"
         waterReminderToggleItem.title = waterReminderEnabled ? "关闭喝水提醒" : "开启喝水提醒"
-        waterReminderToggleItem.state = waterReminderEnabled ? .on : .off
+        waterReminderToggleItem.state = .off
         waterReminderIntervalItems.forEach {
             $0.state = $0.tag == waterReminderIntervalMinutes ? .on : .off
         }
@@ -1427,6 +1459,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 enum CodexQuotaBarMain {
     static func runSelfTest() {
+        let authError = """
+        (node:123) [UNDICI-EHPA] Warning: experimental
+        {
+          "error": {
+            "code": 3,
+            "message": "Console session is not logged in or has expired."
+          }
+        }
+        """
+        guard BailianPlanUsageClient.readableErrorMessage(from: authError) == "登录已过期，请重新登录",
+              BailianPlanUsageClient.readableErrorMessage(
+                from: #"{"error":{"code":9,"message":"Service unavailable"}}"#
+              ) == "Service unavailable" else {
+            fputs("SELF_TEST_BAILIAN_ERROR_PARSING_FAILED\n", stderr)
+            exit(1)
+        }
+
         let client = CodexRateLimitClient()
         var finished = false
         client.onSnapshot = { snapshot, _ in
