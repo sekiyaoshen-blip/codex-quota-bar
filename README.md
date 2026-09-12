@@ -1,5 +1,7 @@
 # codex-quota-bar
 
+仅支持 Apple Silicon（M 系列芯片）；构建流程固定生成原生 `arm64` 应用，不提供 Intel 或 Rosetta 版本。
+
 轻量的 macOS 菜单栏应用，用于查看 Codex 剩余额度并提供喝水提醒。
 
 ## 功能
