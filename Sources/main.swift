@@ -20,12 +20,16 @@ enum CodexProvider: String, CaseIterable {
     case official
     case deepseek
     case aliyun
+    case apiopencc
+    case felixxxxx
 
     var displayName: String {
         switch self {
         case .official: return "OpenAI 官方"
         case .deepseek: return "DeepSeek 官方"
         case .aliyun: return "阿里百炼 Token Plan"
+        case .apiopencc: return "apiopencc"
+        case .felixxxxx: return "Felixxxxx"
         }
     }
 
@@ -34,6 +38,8 @@ enum CodexProvider: String, CaseIterable {
         case .official: return "OpenAI"
         case .deepseek: return "DeepSeek"
         case .aliyun: return "百炼 Token Plan"
+        case .apiopencc: return "apiopencc"
+        case .felixxxxx: return "Felixxxxx"
         }
     }
 }
@@ -111,6 +117,12 @@ final class CodexProviderSwitcher {
                 }
                 if self.hasCredential(named: "deepseek-aliyun-key") {
                     available.insert(.aliyun)
+                }
+                if output.contains("apiopencc access: 已配置") {
+                    available.insert(.apiopencc)
+                }
+                if output.contains("Felixxxxx access: 已配置") {
+                    available.insert(.felixxxxx)
                 }
                 return .success(CodexProviderStatus(current: current, available: available))
             })
@@ -584,7 +596,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.6", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.4.7", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -1080,6 +1092,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         case .deepseek:
             statusItem.button?.title = "DeepSeek"
+        case .apiopencc:
+            statusItem.button?.title = "apiopencc"
+        case .felixxxxx:
+            statusItem.button?.title = "Felixxxxx"
         case .official, nil:
             let openAIText: String
             if let snapshot = latestSnapshot {
