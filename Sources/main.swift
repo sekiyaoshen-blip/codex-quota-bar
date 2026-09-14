@@ -42,6 +42,26 @@ enum CodexProvider: String, CaseIterable {
         case .felixxxxx: return "Felixxxxx"
         }
     }
+
+    var usagePageTitle: String {
+        switch self {
+        case .official: return "打开 Codex 用量页面"
+        case .deepseek: return "打开 DeepSeek 用量页面"
+        case .aliyun: return "打开百炼 Token Plan 用量页面"
+        case .apiopencc: return "打开 apiopencc 控制台"
+        case .felixxxxx: return "打开 Felixxxxx 网关"
+        }
+    }
+
+    var usagePageURL: URL? {
+        switch self {
+        case .official: return URL(string: "https://chatgpt.com/codex/settings/usage")
+        case .deepseek: return URL(string: "https://platform.deepseek.com/usage")
+        case .aliyun: return URL(string: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/overview")
+        case .apiopencc: return URL(string: "https://apiopencc.com/console")
+        case .felixxxxx: return URL(string: "https://codex.felixxxxx.uk/")
+        }
+    }
 }
 
 struct BailianPlanSnapshot {
@@ -49,6 +69,19 @@ struct BailianPlanSnapshot {
     let resetsAt: Date?
 
     var remainingPercent: Double { max(0, 100 - usedPercent) }
+}
+
+struct DeepSeekBalanceSnapshot {
+    let currency: String
+    let total: Double
+
+    var displayText: String {
+        switch currency.uppercased() {
+        case "CNY": return String(format: "¥%.2f", total)
+        case "USD": return String(format: "$%.2f", total)
+        default: return String(format: "%.2f %@", total, currency)
+        }
+    }
 }
 
 struct CodexProviderStatus {
@@ -129,11 +162,11 @@ final class CodexProviderSwitcher {
         }
     }
 
-    func activate(_ provider: CodexProvider, completion: @escaping (Result<Void, Error>) -> Void) {
-        run(command: provider.rawValue) { result in completion(result.map { _ in () }) }
+    func activate(_ provider: CodexProvider, completion: @escaping (Result<String, Error>) -> Void) {
+        run(command: provider.rawValue, migrateRecent: true, completion: completion)
     }
 
-    private func run(command: String, completion: @escaping (Result<String, Error>) -> Void) {
+    private func run(command: String, migrateRecent: Bool = false, completion: @escaping (Result<String, Error>) -> Void) {
         queue.async {
             guard let script = self.scriptURL() else {
                 DispatchQueue.main.async { completion(.failure(SwitchError.missingScript)) }
@@ -145,6 +178,15 @@ final class CodexProviderSwitcher {
             let errors = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
             process.arguments = [script.path, command]
+            if migrateRecent {
+                guard let python = LocalExecutable.find("python3"),
+                      let helper = Bundle.main.url(forResource: "switch-recent", withExtension: "py") else {
+                    DispatchQueue.main.async { completion(.failure(SwitchError.failed("缺少 Python 3 或会话迁移脚本"))) }
+                    return
+                }
+                process.executableURL = python
+                process.arguments = [helper.path, command]
+            }
             process.standardOutput = output
             process.standardError = errors
             do {
@@ -316,6 +358,150 @@ final class BailianPlanUsageClient {
     }
 
     private func publishSnapshot(_ snapshot: BailianPlanSnapshot) {
+        DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot) }
+    }
+
+    private func publishState(_ state: State) {
+        DispatchQueue.main.async { [weak self] in self?.onStateChange?(state) }
+    }
+}
+
+final class DeepSeekBalanceClient {
+    enum State {
+        case starting
+        case ready
+        case error(String)
+    }
+
+    static let endpoint = URL(string: "https://api.deepseek.com/user/balance")!
+
+    var onSnapshot: ((DeepSeekBalanceSnapshot) -> Void)?
+    var onStateChange: ((State) -> Void)?
+
+    private let queue = DispatchQueue(label: "com.seki.codexquotabar.deepseek-balance")
+    private var refreshTimer: DispatchSourceTimer?
+    private var session: URLSession?
+    private var requestInFlight = false
+    private var active = false
+    private var stopped = false
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self, self.refreshTimer == nil else { return }
+            self.stopped = false
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(2))
+            timer.setEventHandler { [weak self] in self?.requestBalance() }
+            timer.resume()
+            self.refreshTimer = timer
+        }
+    }
+
+    /// DeepSeek balance is only polled while DeepSeek is the active channel.
+    func setActive(_ value: Bool) {
+        queue.async { [weak self] in
+            guard let self, self.active != value else { return }
+            self.active = value
+            if value { self.requestBalance() }
+        }
+    }
+
+    func refresh() {
+        queue.async { [weak self] in self?.requestBalance() }
+    }
+
+    func stop() {
+        queue.sync {
+            stopped = true
+            refreshTimer?.cancel()
+            refreshTimer = nil
+            session?.invalidateAndCancel()
+            session = nil
+            requestInFlight = false
+        }
+    }
+
+    private func requestBalance() {
+        guard !stopped, active, !requestInFlight else { return }
+        guard let key = Self.storedKey() else {
+            publishState(.error("未找到 DeepSeek 密钥"))
+            return
+        }
+        requestInFlight = true
+
+        var request = URLRequest(url: Self.endpoint)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("codex-quota-bar/1.6.0", forHTTPHeaderField: "User-Agent")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = 20
+        let session = URLSession(configuration: configuration)
+        self.session = session
+
+        session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            self.queue.async {
+                session.finishTasksAndInvalidate()
+                self.session = nil
+                self.requestInFlight = false
+                guard !self.stopped, self.active else { return }
+                if let error {
+                    self.publishState(.error(error.localizedDescription))
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    self.publishState(.error("DeepSeek 余额读取失败"))
+                    return
+                }
+                guard http.statusCode == 200, let data else {
+                    let message = http.statusCode == 401 || http.statusCode == 403
+                        ? "DeepSeek 密钥无效或已失效"
+                        : "DeepSeek 余额读取失败（HTTP \(http.statusCode)）"
+                    self.publishState(.error(message))
+                    return
+                }
+                guard let snapshot = Self.parseBalance(data) else {
+                    self.publishState(.error("DeepSeek 余额数据格式已变化"))
+                    return
+                }
+                self.publishSnapshot(snapshot)
+                self.publishState(.ready)
+            }
+        }.resume()
+    }
+
+    static func storedKey() -> String? {
+        if let environment = ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !environment.isEmpty {
+            return environment
+        }
+        let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+        let url = codexHome.appendingPathComponent("codex-switch/deepseek-key")
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func parseBalance(_ data: Data) -> DeepSeekBalanceSnapshot? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let infos = object["balance_infos"] as? [[String: Any]] else { return nil }
+        let preferred = infos.first { (($0["currency"] as? String) ?? "").uppercased() == "CNY" }
+            ?? infos.first
+        guard let info = preferred,
+              let currency = info["currency"] as? String,
+              let totalText = info["total_balance"] as? String,
+              let total = Double(totalText) else { return nil }
+        return DeepSeekBalanceSnapshot(currency: currency, total: total)
+    }
+
+    private func publishSnapshot(_ snapshot: DeepSeekBalanceSnapshot) {
         DispatchQueue.main.async { [weak self] in self?.onSnapshot?(snapshot) }
     }
 
@@ -628,7 +814,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.4.9", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.0", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -914,6 +1100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let client = CodexRateLimitClient()
     private let bailianClient = BailianPlanUsageClient()
+    private let deepSeekClient = DeepSeekBalanceClient()
     private let providerSwitcher = CodexProviderSwitcher()
     private let autoUpdater = AutoUpdater()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -926,26 +1113,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let resetCreditsItem = NSMenuItem(title: "可用重置：等待数据", action: nil, keyEquivalent: "")
     private let bailianQuotaTitleItem = NSMenuItem(title: "百炼 Token Plan", action: nil, keyEquivalent: "")
     private let bailianWeekItem = NSMenuItem(title: "一周：等待数据", action: nil, keyEquivalent: "")
-    private let quotaUnavailableItem = NSMenuItem(title: "DeepSeek 暂无额度数据", action: nil, keyEquivalent: "")
+    private let deepSeekSectionSeparatorItem = NSMenuItem.separator()
+    private let deepSeekQuotaTitleItem = NSMenuItem(title: "DeepSeek 官方", action: nil, keyEquivalent: "")
+    private let deepSeekBalanceItem = NSMenuItem(title: "余额：等待数据", action: nil, keyEquivalent: "")
     private let openAIUpdateItem = NSMenuItem(title: "OpenAI：读取中…", action: nil, keyEquivalent: "")
     private let bailianSectionSeparatorItem = NSMenuItem.separator()
     private let bailianUpdateItem = NSMenuItem(title: "百炼：读取中…", action: nil, keyEquivalent: "")
+    private let deepSeekUpdateItem = NSMenuItem(title: "DeepSeek：读取中…", action: nil, keyEquivalent: "")
+    private let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: nil, keyEquivalent: "")
     private let waterReminderRootItem = NSMenuItem(title: "喝水提醒：已关闭", action: nil, keyEquivalent: "")
     private let waterReminderToggleItem = NSMenuItem(title: "开启喝水提醒", action: nil, keyEquivalent: "")
     private let nextWaterReminderItem = NSMenuItem(title: "下次提醒：—", action: nil, keyEquivalent: "")
     private let hydrationOverlay = HydrationOverlayController()
     private var latestSnapshot: RateLimitSnapshot?
     private var latestBailianSnapshot: BailianPlanSnapshot?
+    private var latestDeepSeekSnapshot: DeepSeekBalanceSnapshot?
     private var currentProvider: CodexProvider?
     private var availableProviders: Set<CodexProvider> = [.official]
     private var providerItems: [CodexProvider: NSMenuItem] = [:]
     private var openAIHasError = false
     private var bailianHasError = false
+    private var deepSeekHasError = false
     private var waterReminderIntervalItems: [NSMenuItem] = []
     private var waterReminderTimer: Timer?
     private var nextWaterReminderDate: Date?
     private var waterReminderEnabled = false
     private var waterReminderIntervalMinutes = 60
+    private var providerSwitchInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -975,8 +1169,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.renderCurrentQuota()
         }
         bailianClient.onStateChange = { [weak self] state in self?.render(state) }
+        deepSeekClient.onSnapshot = { [weak self] snapshot in
+            self?.latestDeepSeekSnapshot = snapshot
+            self?.renderCurrentQuota()
+        }
+        deepSeekClient.onStateChange = { [weak self] state in self?.render(state) }
         client.start()
         bailianClient.start()
+        deepSeekClient.start()
         refreshCurrentProvider()
         if waterReminderEnabled {
             resetWaterReminderSchedule()
@@ -989,6 +1189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoUpdater.stop()
         client.stop()
         bailianClient.stop()
+        deepSeekClient.stop()
     }
 
     private func configureStatusItem() {
@@ -1009,12 +1210,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         configureProviderMenu()
         menu.addItem(providerRootItem)
-        menu.addItem(quotaUnavailableItem)
         menu.addItem(providerSectionSeparatorItem)
 
         [openAIQuotaTitleItem, fiveHourItem, weekItem, resetCreditsItem,
-         bailianQuotaTitleItem, bailianWeekItem, quotaUnavailableItem,
-         openAIUpdateItem, bailianUpdateItem].forEach { $0.isEnabled = false }
+         bailianQuotaTitleItem, bailianWeekItem,
+         deepSeekQuotaTitleItem, deepSeekBalanceItem,
+         openAIUpdateItem, bailianUpdateItem, deepSeekUpdateItem].forEach { $0.isEnabled = false }
         menu.addItem(openAIQuotaTitleItem)
         menu.addItem(fiveHourItem)
         menu.addItem(weekItem)
@@ -1024,9 +1225,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(bailianQuotaTitleItem)
         menu.addItem(bailianWeekItem)
         menu.addItem(bailianUpdateItem)
+        menu.addItem(deepSeekSectionSeparatorItem)
+        menu.addItem(deepSeekQuotaTitleItem)
+        menu.addItem(deepSeekBalanceItem)
+        menu.addItem(deepSeekUpdateItem)
         menu.addItem(.separator())
 
-        let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: #selector(openUsagePage), keyEquivalent: "")
+        usageItem.action = #selector(openUsagePage)
         usageItem.target = self
         menu.addItem(usageItem)
 
@@ -1051,6 +1256,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureProviderMenu() {
         let submenu = NSMenu(title: "模型供应商")
+        for title in ["同时切换近 7 日未归档会话", "将重启 Codex，中断运行中的任务"] {
+            let hint = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            submenu.addItem(hint)
+        }
+        submenu.addItem(.separator())
         providerItems = Dictionary(uniqueKeysWithValues: CodexProvider.allCases.enumerated().map { index, provider in
             let item = NSMenuItem(
                 title: provider.displayName,
@@ -1099,11 +1310,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateQuotaVisibility()
         if let latestSnapshot { render(latestSnapshot) }
         if let latestBailianSnapshot { render(latestBailianSnapshot) }
+        if let latestDeepSeekSnapshot { render(latestDeepSeekSnapshot) }
         updateStatusTitle()
     }
 
     private func updateQuotaVisibility() {
         let showBailian = availableProviders.contains(.aliyun) || latestBailianSnapshot != nil
+        let showDeepSeek = currentProvider == .deepseek || latestDeepSeekSnapshot != nil
         fiveHourItem.isHidden = latestSnapshot?.fiveHour == nil
         weekItem.isHidden = latestSnapshot?.weekly == nil
         openAIUpdateItem.isHidden = latestSnapshot != nil && !openAIHasError
@@ -1111,7 +1324,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bailianQuotaTitleItem.isHidden = !showBailian
         bailianWeekItem.isHidden = !showBailian
         bailianUpdateItem.isHidden = !showBailian || (latestBailianSnapshot != nil && !bailianHasError)
-        quotaUnavailableItem.isHidden = currentProvider != .deepseek
+        deepSeekSectionSeparatorItem.isHidden = !showDeepSeek
+        deepSeekQuotaTitleItem.isHidden = !showDeepSeek
+        deepSeekBalanceItem.isHidden = !showDeepSeek
+        deepSeekUpdateItem.isHidden = !showDeepSeek
+            || (latestDeepSeekSnapshot != nil && !deepSeekHasError)
+        updateUsageItem()
+    }
+
+    private func updateUsageItem() {
+        guard let provider = currentProvider else {
+            usageItem.title = "打开 Codex 用量页面"
+            usageItem.isEnabled = false
+            return
+        }
+        usageItem.title = provider.usagePageTitle
+        usageItem.isEnabled = provider.usagePageURL != nil
     }
 
     private func updateStatusTitle() {
@@ -1123,7 +1351,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 statusItem.button?.title = bailianHasError ? "⚠︎" : "…"
             }
         case .deepseek:
-            statusItem.button?.title = "DeepSeek"
+            if let snapshot = latestDeepSeekSnapshot {
+                statusItem.button?.title = snapshot.displayText
+            } else {
+                statusItem.button?.title = deepSeekHasError ? "⚠︎" : "…"
+            }
         case .apiopencc:
             statusItem.button?.title = "apiopencc"
         case .felixxxxx:
@@ -1165,6 +1397,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusTitle()
     }
 
+    private func render(_ snapshot: DeepSeekBalanceSnapshot) {
+        deepSeekBalanceItem.title = "余额：\(snapshot.displayText)"
+        deepSeekHasError = false
+        updateQuotaVisibility()
+        updateStatusTitle()
+    }
+
     private func render(_ state: CodexRateLimitClient.State) {
         switch state {
         case .starting:
@@ -1188,6 +1427,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .error(let message):
             bailianHasError = true
             bailianUpdateItem.title = "百炼：\(concise(message))"
+        }
+        updateQuotaVisibility()
+        updateStatusTitle()
+    }
+
+    private func render(_ state: DeepSeekBalanceClient.State) {
+        switch state {
+        case .starting:
+            deepSeekUpdateItem.title = "DeepSeek：读取中…"
+        case .ready:
+            break
+        case .error(let message):
+            deepSeekHasError = true
+            deepSeekUpdateItem.title = "DeepSeek：\(concise(message))"
         }
         updateQuotaVisibility()
         updateStatusTitle()
@@ -1357,10 +1610,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshCurrentProvider() {
         providerSwitcher.refresh { [weak self] result in
             guard let self else { return }
+            guard !self.providerSwitchInProgress else { return }
             switch result {
             case .success(let status):
                 self.currentProvider = status.current
                 self.availableProviders = status.available
+                self.deepSeekClient.setActive(status.current == .deepseek)
                 self.providerStatusItem.isHidden = true
             case .failure(let error):
                 self.providerStatusItem.title = self.concise(error.localizedDescription)
@@ -1379,71 +1634,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         providerSectionSeparatorItem.isHidden = !showProviderSwitcher
         providerItems.forEach { provider, item in
             item.state = provider == currentProvider ? .on : .off
-            item.isEnabled = !isSwitching
+            item.isEnabled = !isSwitching && !providerSwitchInProgress
             item.isHidden = !availableProviders.contains(provider)
         }
     }
 
     @objc private func selectProvider(_ sender: NSMenuItem) {
         guard CodexProvider.allCases.indices.contains(sender.tag) else { return }
+        guard !providerSwitchInProgress else { return }
+        providerSwitchInProgress = true
         let provider = CodexProvider.allCases[sender.tag]
-        guard provider != currentProvider else {
-            providerStatusItem.isHidden = true
-            return
-        }
-
-        providerStatusItem.title = "正在切换到 \(provider.displayName)…"
+        providerStatusItem.title = "正在退出 Codex 并切换近 7 日会话…"
         providerStatusItem.isHidden = false
         updateProviderMenu(isSwitching: true)
-        providerSwitcher.activate(provider) { [weak self] result in
+        let applications = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+        let applicationURL = applications.first?.bundleURL
+        applications.forEach { $0.terminate() }
+        waitForCodexExit(deadline: Date().addingTimeInterval(20)) { [weak self] exited in
             guard let self else { return }
-            switch result {
-            case .success:
-                self.currentProvider = provider
-                self.availableProviders.insert(provider)
-                self.providerStatusItem.isHidden = true
+            guard exited else {
+                self.providerSwitchInProgress = false
+                self.providerStatusItem.title = "Codex 尚未退出，切换已取消"
                 self.updateProviderMenu()
-                self.renderCurrentQuota()
-                if provider == .aliyun { self.bailianClient.refresh() }
-                self.restartCodexIfRunning()
-            case .failure(let error):
-                self.providerStatusItem.title = "切换失败：\(self.concise(error.localizedDescription, limit: 70))"
-                self.providerStatusItem.isHidden = false
-                self.updateProviderMenu()
+                return
+            }
+            self.providerSwitcher.activate(provider) { [weak self] result in
+                guard let self else { return }
+                self.providerSwitchInProgress = false
+                switch result {
+                case .success(let output):
+                    self.currentProvider = provider
+                    self.availableProviders.insert(provider)
+                    self.deepSeekClient.setActive(provider == .deepseek)
+                    let data = output.data(using: .utf8) ?? Data()
+                    let info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    let count = (info?["eligible"] as? Int).map(String.init) ?? "—"
+                    self.providerStatusItem.title = "近 7 日 \(count) 个会话已切换"
+                    self.providerStatusItem.isHidden = false
+                    self.updateProviderMenu()
+                    self.renderCurrentQuota()
+                    if provider == .aliyun { self.bailianClient.refresh() }
+                case .failure(let error):
+                    self.providerStatusItem.title = "切换失败：\(self.concise(error.localizedDescription, limit: 70))"
+                    self.providerStatusItem.isHidden = false
+                    self.updateProviderMenu()
+                }
+                if let applicationURL { self.reopenCodex(at: applicationURL) }
             }
         }
     }
 
-    private func restartCodexIfRunning() {
-        let bundleIdentifier = "com.openai.codex"
-        let applications = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-        guard !applications.isEmpty else {
+    private func waitForCodexExit(deadline: Date, completion: @escaping (Bool) -> Void) {
+        if NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty {
+            completion(true)
             return
         }
-        applications.forEach { $0.terminate() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
-                self?.providerStatusItem.title = "切换完成；请手动重开 Codex"
-                self?.providerStatusItem.isHidden = false
-                return
-            }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { _, error in
-                DispatchQueue.main.async {
-                    if error != nil {
-                        self?.providerStatusItem.title = "切换完成；请手动重开 Codex"
-                        self?.providerStatusItem.isHidden = false
-                    }
+        guard Date() < deadline else { completion(false); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.waitForCodexExit(deadline: deadline, completion: completion)
+        }
+    }
+
+    private func reopenCodex(at applicationURL: URL) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { [weak self] _, error in
+            DispatchQueue.main.async {
+                if error != nil {
+                    self?.providerStatusItem.title = "请手动重开 Codex"
+                    self?.providerStatusItem.isHidden = false
                 }
             }
         }
     }
 
     @objc private func openUsagePage() {
-        if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
-            NSWorkspace.shared.open(url)
-        }
+        guard let url = currentProvider?.usagePageURL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func openTiboProfile() {
@@ -1473,6 +1740,18 @@ enum CodexQuotaBarMain {
                 from: #"{"error":{"code":9,"message":"Service unavailable"}}"#
               ) == "Service unavailable" else {
             fputs("SELF_TEST_BAILIAN_ERROR_PARSING_FAILED\n", stderr)
+            exit(1)
+        }
+
+        let balanceFixture = Data(#"""
+        {"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"1.50","granted_balance":"0.00","topped_up_balance":"1.50"},{"currency":"CNY","total_balance":"88.57","granted_balance":"0.00","topped_up_balance":"88.57"}]}
+        """#.utf8)
+        guard let balance = DeepSeekBalanceClient.parseBalance(balanceFixture),
+              balance.currency == "CNY",
+              balance.displayText == "¥88.57",
+              DeepSeekBalanceClient.parseBalance(Data(#"{"balance_infos":[]}"#.utf8)) == nil,
+              CodexProvider.allCases.allSatisfy({ $0.usagePageURL != nil }) else {
+            fputs("SELF_TEST_DEEPSEEK_BALANCE_FAILED\n", stderr)
             exit(1)
         }
 
@@ -1507,10 +1786,43 @@ enum CodexQuotaBarMain {
             runSelfTest()
             return
         }
+        if CommandLine.arguments.contains("--deepseek-balance-test") {
+            runDeepSeekBalanceTest()
+            return
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
+    }
+
+    /// Real end-to-end check of the DeepSeek balance path (uses the local vault key).
+    static func runDeepSeekBalanceTest() {
+        let client = DeepSeekBalanceClient()
+        var finished = false
+        client.onSnapshot = { snapshot in
+            print("DEEPSEEK_BALANCE_OK \(snapshot.displayText)")
+            finished = true
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        client.onStateChange = { state in
+            if case .error(let message) = state {
+                fputs("DEEPSEEK_BALANCE_ERROR \(message)\n", stderr)
+                finished = false
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+        }
+        client.start()
+        client.setActive(true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+            if !finished {
+                fputs("DEEPSEEK_BALANCE_TIMEOUT\n", stderr)
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+        }
+        CFRunLoopRun()
+        client.stop()
+        exit(finished ? 0 : 1)
     }
 }
 
