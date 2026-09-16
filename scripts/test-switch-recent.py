@@ -74,11 +74,13 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT DISTINCT model_provider FROM threads').fetchall(),[('openai',)])
 
     def test_cross_family_model(self):
-        self.assertEqual(migration.model_for('aliyun','gpt-6-astra'),'deepseek-v4-pro-0813')
+        self.assertEqual(migration.model_for('aliyun','gpt-6-astra'),'deepseek-v4.1-flash')
         self.assertEqual(migration.model_for('official','deepseek-v4-pro'),'gpt-6-astra')
+        self.assertEqual(migration.model_for('aliyun','deepseek-v4-pro-0813'),'deepseek-v4-pro-0813')
+        self.assertEqual(migration.model_for('aliyun','deepseek-v4.1-flash'),'deepseek-v4.1-flash')
         self.add('cross')
         migration.migrate(self.home,'aliyun',False,self.now)
-        self.assertEqual(self.db.execute('SELECT model,reasoning_effort FROM threads').fetchone(),('deepseek-v4-pro-0813','high'))
+        self.assertEqual(self.db.execute('SELECT model,reasoning_effort FROM threads').fetchone(),('deepseek-v4.1-flash','high'))
 
     def test_config_failure_restores_login_and_history(self):
         path = self.add('recent')

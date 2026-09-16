@@ -433,7 +433,7 @@ final class DeepSeekBalanceClient {
         request.httpMethod = "GET"
         request.timeoutInterval = 20
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.6.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.1", forHTTPHeaderField: "User-Agent")
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -814,7 +814,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.6.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.1", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }

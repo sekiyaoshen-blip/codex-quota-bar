@@ -14,9 +14,17 @@ import time
 TARGETS = {
     'official': ('openai', 'gpt-6-astra'),
     'deepseek': ('custom', 'deepseek-v4-pro'),
-    'aliyun': ('aliyun', 'deepseek-v4-pro-0813'),
+    'aliyun': ('aliyun', 'deepseek-v4.1-flash'),
     'apiopencc': ('apiopencc', 'gpt-6-astra'),
     'felixxxxx': ('felixxxxx', 'gpt-6-astra'),
+}
+
+# Model ids the Token Plan channel actually serves; those are kept as-is.
+ALIYUN_MODELS = {
+    'deepseek-v4.1-flash',
+    'deepseek-v4-pro',
+    'deepseek-v4-pro-0813',
+    'deepseek-v4-flash-0731',
 }
 
 
@@ -24,6 +32,8 @@ def model_for(provider, model):
     if provider in ('official', 'apiopencc', 'felixxxxx') and (model or '').startswith('gpt-'):
         return model
     if provider == 'deepseek' and model in ('deepseek-v4-pro', 'deepseek-v4-flash'):
+        return model
+    if provider == 'aliyun' and model in ALIYUN_MODELS:
         return model
     return TARGETS[provider][1]
 
