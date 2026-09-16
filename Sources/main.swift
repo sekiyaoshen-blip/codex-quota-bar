@@ -286,11 +286,42 @@ final class BailianPlanUsageClient {
             return
         }
 
+        var attempt = Self.runUsage(executable: executable, extraArguments: [])
+        // The console login token lives in the `default` profile, while the
+        // token-plan profile only carries the API key; fall back to it.
+        if attempt.status != 0, Self.needsProfileFallback(stderr: attempt.stderr) {
+            let fallback = Self.runUsage(executable: executable, extraArguments: ["--config", "default"])
+            if fallback.status == 0 { attempt = fallback }
+        }
+        requestInFlight = false
+        guard attempt.status == 0 else {
+            let message = Self.readableErrorMessage(from: attempt.stderr)
+            publishState(.error(message.isEmpty ? "百炼额度读取失败" : message))
+            return
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: attempt.stdout) as? [String: Any],
+              let fraction = (object["per1WeekPercentage"] as? NSNumber)?.doubleValue else {
+            publishState(.error("百炼额度数据格式已变化"))
+            return
+        }
+        let resetMilliseconds = (object["per1WeekResetTime"] as? NSNumber)?.doubleValue
+        let snapshot = BailianPlanSnapshot(
+            usedPercent: min(100, max(0, fraction * 100)),
+            resetsAt: resetMilliseconds.map { Date(timeIntervalSince1970: $0 / 1_000) }
+        )
+        publishSnapshot(snapshot)
+        publishState(.ready)
+    }
+
+    static func runUsage(
+        executable: URL,
+        extraArguments: [String]
+    ) -> (status: Int32, stdout: Data, stderr: String) {
         let process = Process()
         let output = Pipe()
         let errors = Pipe()
         process.executableURL = executable
-        process.arguments = ["usage", "token-plan", "--output", "json"]
+        process.arguments = ["usage", "token-plan"] + extraArguments + ["--output", "json"]
         var environment = ProcessInfo.processInfo.environment
         environment["NO_COLOR"] = "1"
         process.environment = environment
@@ -304,28 +335,16 @@ final class BailianPlanUsageClient {
                 data: errors.fileHandleForReading.readDataToEndOfFile(),
                 encoding: .utf8
             ) ?? ""
-            requestInFlight = false
-            guard process.terminationStatus == 0 else {
-                let message = Self.readableErrorMessage(from: stderr)
-                publishState(.error(message.isEmpty ? "百炼额度读取失败" : message))
-                return
-            }
-            guard let object = try? JSONSerialization.jsonObject(with: stdout) as? [String: Any],
-                  let fraction = (object["per1WeekPercentage"] as? NSNumber)?.doubleValue else {
-                publishState(.error("百炼额度数据格式已变化"))
-                return
-            }
-            let resetMilliseconds = (object["per1WeekResetTime"] as? NSNumber)?.doubleValue
-            let snapshot = BailianPlanSnapshot(
-                usedPercent: min(100, max(0, fraction * 100)),
-                resetsAt: resetMilliseconds.map { Date(timeIntervalSince1970: $0 / 1_000) }
-            )
-            publishSnapshot(snapshot)
-            publishState(.ready)
+            return (process.terminationStatus, stdout, stderr)
         } catch {
-            requestInFlight = false
-            publishState(.error(error.localizedDescription))
+            return (1, Data(), error.localizedDescription)
         }
+    }
+
+    static func needsProfileFallback(stderr: String) -> Bool {
+        stderr.contains("\"code\": 3")
+            || stderr.contains("\"code\":3")
+            || stderr.localizedCaseInsensitiveContains("No console access token")
     }
 
     static func readableErrorMessage(from stderr: String) -> String {
@@ -433,7 +452,7 @@ final class DeepSeekBalanceClient {
         request.httpMethod = "GET"
         request.timeoutInterval = 20
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.6.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.2", forHTTPHeaderField: "User-Agent")
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -814,7 +833,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.6.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.2", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -1738,7 +1757,11 @@ enum CodexQuotaBarMain {
         guard BailianPlanUsageClient.readableErrorMessage(from: authError) == "登录已过期，请重新登录",
               BailianPlanUsageClient.readableErrorMessage(
                 from: #"{"error":{"code":9,"message":"Service unavailable"}}"#
-              ) == "Service unavailable" else {
+              ) == "Service unavailable",
+              BailianPlanUsageClient.needsProfileFallback(stderr: authError),
+              !BailianPlanUsageClient.needsProfileFallback(
+                stderr: #"{"error":{"code":9,"message":"Service unavailable"}}"#
+              ) else {
             fputs("SELF_TEST_BAILIAN_ERROR_PARSING_FAILED\n", stderr)
             exit(1)
         }
@@ -1786,6 +1809,10 @@ enum CodexQuotaBarMain {
             runSelfTest()
             return
         }
+        if CommandLine.arguments.contains("--bailian-usage-test") {
+            runBailianUsageTest()
+            return
+        }
         if CommandLine.arguments.contains("--deepseek-balance-test") {
             runDeepSeekBalanceTest()
             return
@@ -1817,6 +1844,34 @@ enum CodexQuotaBarMain {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
             if !finished {
                 fputs("DEEPSEEK_BALANCE_TIMEOUT\n", stderr)
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+        }
+        CFRunLoopRun()
+        client.stop()
+        exit(finished ? 0 : 1)
+    }
+
+    /// Real end-to-end check of the Bailian Token Plan usage path (uses the `bl` CLI).
+    static func runBailianUsageTest() {
+        let client = BailianPlanUsageClient()
+        var finished = false
+        client.onSnapshot = { snapshot in
+            print("BAILIAN_USAGE_OK remaining=\(String(format: "%.2f", snapshot.remainingPercent))%")
+            finished = true
+            CFRunLoopStop(CFRunLoopGetMain())
+        }
+        client.onStateChange = { state in
+            if case .error(let message) = state {
+                fputs("BAILIAN_USAGE_ERROR \(message)\n", stderr)
+                finished = false
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+        }
+        client.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+            if !finished {
+                fputs("BAILIAN_USAGE_TIMEOUT\n", stderr)
                 CFRunLoopStop(CFRunLoopGetMain())
             }
         }
