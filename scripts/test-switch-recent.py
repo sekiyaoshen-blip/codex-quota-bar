@@ -78,9 +78,25 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(migration.model_for('official','deepseek-v4-pro'),'gpt-6-astra')
         self.assertEqual(migration.model_for('aliyun','deepseek-v4-pro-0813'),'deepseek-v4-pro-0813')
         self.assertEqual(migration.model_for('aliyun','deepseek-v4.1-flash'),'deepseek-v4.1-flash')
+        self.assertEqual(migration.model_for('deepseek','gpt-6-astra'),'deepseek-flash')
+        self.assertEqual(migration.model_for('deepseek','deepseek-flash'),'deepseek-flash')
+        self.assertEqual(migration.model_for('deepseek','deepseek-v4-pro'),'deepseek-flash')
+        self.assertEqual(migration.model_for('deepseek','deepseek-v4-flash'),'deepseek-flash')
         self.add('cross')
         migration.migrate(self.home,'aliyun',False,self.now)
         self.assertEqual(self.db.execute('SELECT model,reasoning_effort FROM threads').fetchone(),('deepseek-v4.1-flash','high'))
+
+    def test_deepseek_target_lands_on_flash(self):
+        pro = self.add('pro', model='deepseek-v4-pro')
+        flash = self.add('flash', model='deepseek-flash')
+        result = migration.migrate(self.home,'deepseek',False,self.now)
+        self.assertEqual(result['changed'],2)
+        rows = dict(self.db.execute('SELECT id, model FROM threads').fetchall())
+        self.assertEqual(rows['pro'],'deepseek-flash')
+        self.assertEqual(rows['flash'],'deepseek-flash')
+        self.assertEqual(self.db.execute('SELECT DISTINCT model_provider FROM threads').fetchall(),[('custom',)])
+        for path in (pro,flash):
+            self.assertEqual(json.loads(path.read_bytes().split(b'\n',1)[0])['payload']['model_provider'],'custom')
 
     def test_config_failure_restores_login_and_history(self):
         path = self.add('recent')

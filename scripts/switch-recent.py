@@ -13,7 +13,7 @@ import time
 
 TARGETS = {
     'official': ('openai', 'gpt-6-astra'),
-    'deepseek': ('custom', 'deepseek-v4-pro'),
+    'deepseek': ('custom', 'deepseek-flash'),
     'aliyun': ('aliyun', 'deepseek-v4.1-flash'),
     'apiopencc': ('apiopencc', 'gpt-6-astra'),
     'felixxxxx': ('felixxxxx', 'gpt-6-astra'),
@@ -31,10 +31,10 @@ ALIYUN_MODELS = {
 def model_for(provider, model):
     if provider in ('official', 'apiopencc', 'felixxxxx') and (model or '').startswith('gpt-'):
         return model
-    if provider == 'deepseek' and model in ('deepseek-v4-pro', 'deepseek-v4-flash'):
-        return model
     if provider == 'aliyun' and model in ALIYUN_MODELS:
         return model
+    # DeepSeek 官方只有 flash 一个默认型号：旧写法把 v4-pro / v4-flash 保留下来，
+    # 于是已经改成 deepseek-flash 的会话在下次切换时又会被抬回 v4-pro。
     return TARGETS[provider][1]
 
 
