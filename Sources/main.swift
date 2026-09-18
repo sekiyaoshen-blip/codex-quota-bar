@@ -269,6 +269,68 @@ final class BailianPlanUsageClient {
         queue.async { [weak self] in self?.requestUsage() }
     }
 
+    /// Runs the console login so a fresh token is stored where the usage query
+    /// reads it, then refreshes the quota.
+    func reauthenticate(completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard let executable = LocalExecutable.find("bl") else {
+                DispatchQueue.main.async {
+                    completion(.failure(Self.error("未找到百炼 CLI（bl）")))
+                }
+                return
+            }
+            let process = Process()
+            let errors = Pipe()
+            process.executableURL = executable
+            process.arguments = ["auth", "login", "--console", "--config", "default"]
+            var environment = ProcessInfo.processInfo.environment
+            environment["NO_COLOR"] = "1"
+            process.environment = environment
+            process.standardOutput = Pipe()
+            process.standardError = errors
+            do {
+                try process.run()
+                // The browser flow is interactive; stop waiting instead of
+                // blocking the quota refresh forever.
+                let deadline = Date().addingTimeInterval(300)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    process.waitUntilExit()
+                    DispatchQueue.main.async {
+                        completion(.failure(Self.error("登录等待超时，请重试")))
+                    }
+                    return
+                }
+                let stderr = String(
+                    data: errors.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? ""
+                DispatchQueue.main.async {
+                    guard process.terminationStatus == 0 else {
+                        let message = Self.readableErrorMessage(from: stderr)
+                        completion(.failure(Self.error(message.isEmpty
+                            ? "百炼登录未完成（退出码 \(process.terminationStatus)）"
+                            : message)))
+                        return
+                    }
+                    completion(.success(()))
+                }
+                if process.terminationStatus == 0 { self.requestUsage() }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
+
+    private static func error(_ message: String) -> Error {
+        NSError(domain: "codex-quota-bar.bailian", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
     func stop() {
         queue.sync {
             stopped = true
@@ -452,7 +514,7 @@ final class DeepSeekBalanceClient {
         request.httpMethod = "GET"
         request.timeoutInterval = 20
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.6.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.3", forHTTPHeaderField: "User-Agent")
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -833,7 +895,7 @@ final class CodexRateLimitClient {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("codex-quota-bar/1.6.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-quota-bar/1.6.3", forHTTPHeaderField: "User-Agent")
         if let accountID = credentials.accountID, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
@@ -1138,6 +1200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let openAIUpdateItem = NSMenuItem(title: "OpenAI：读取中…", action: nil, keyEquivalent: "")
     private let bailianSectionSeparatorItem = NSMenuItem.separator()
     private let bailianUpdateItem = NSMenuItem(title: "百炼：读取中…", action: nil, keyEquivalent: "")
+    private let bailianReloginItem = NSMenuItem(title: "百炼：重新登录…", action: nil, keyEquivalent: "")
     private let deepSeekUpdateItem = NSMenuItem(title: "DeepSeek：读取中…", action: nil, keyEquivalent: "")
     private let usageItem = NSMenuItem(title: "打开 Codex 用量页面", action: nil, keyEquivalent: "")
     private let waterReminderRootItem = NSMenuItem(title: "喝水提醒：已关闭", action: nil, keyEquivalent: "")
@@ -1152,6 +1215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var providerItems: [CodexProvider: NSMenuItem] = [:]
     private var openAIHasError = false
     private var bailianHasError = false
+    private var bailianNeedsLogin = false
     private var deepSeekHasError = false
     private var waterReminderIntervalItems: [NSMenuItem] = []
     private var waterReminderTimer: Timer?
@@ -1244,6 +1308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(bailianQuotaTitleItem)
         menu.addItem(bailianWeekItem)
         menu.addItem(bailianUpdateItem)
+        bailianReloginItem.target = self
+        bailianReloginItem.action = #selector(reloginBailian)
+        menu.addItem(bailianReloginItem)
         menu.addItem(deepSeekSectionSeparatorItem)
         menu.addItem(deepSeekQuotaTitleItem)
         menu.addItem(deepSeekBalanceItem)
@@ -1343,6 +1410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bailianQuotaTitleItem.isHidden = !showBailian
         bailianWeekItem.isHidden = !showBailian
         bailianUpdateItem.isHidden = !showBailian || (latestBailianSnapshot != nil && !bailianHasError)
+        bailianReloginItem.isHidden = !showBailian || !bailianNeedsLogin
         deepSeekSectionSeparatorItem.isHidden = !showDeepSeek
         deepSeekQuotaTitleItem.isHidden = !showDeepSeek
         deepSeekBalanceItem.isHidden = !showDeepSeek
@@ -1412,6 +1480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let remaining = percentText(snapshot.remainingPercent)
         bailianWeekItem.title = "一周：\(remaining)% · 重置 \(remainingText(until: snapshot.resetsAt))"
         bailianHasError = false
+        bailianNeedsLogin = false
         updateQuotaVisibility()
         updateStatusTitle()
     }
@@ -1445,10 +1514,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             break
         case .error(let message):
             bailianHasError = true
-            bailianUpdateItem.title = "百炼：\(concise(message))"
+            bailianNeedsLogin = Self.isLoginExpired(message)
+            bailianUpdateItem.title = bailianNeedsLogin
+                ? "百炼：登录已过期"
+                : "百炼：\(concise(message))"
         }
         updateQuotaVisibility()
         updateStatusTitle()
+    }
+
+    static func isLoginExpired(_ message: String) -> Bool {
+        message.contains("登录已过期")
+            || message.localizedCaseInsensitiveContains("not logged in")
+            || message.localizedCaseInsensitiveContains("No console access token")
+    }
+
+    @objc private func reloginBailian() {
+        bailianReloginItem.isEnabled = false
+        bailianUpdateItem.title = "百炼：等待浏览器登录…"
+        bailianUpdateItem.isHidden = false
+        bailianClient.reauthenticate { [weak self] result in
+            guard let self else { return }
+            self.bailianReloginItem.isEnabled = true
+            switch result {
+            case .success:
+                self.bailianNeedsLogin = false
+                self.bailianHasError = false
+                self.bailianUpdateItem.title = "百炼：已登录，正在刷新…"
+                self.bailianClient.refresh()
+            case .failure(let error):
+                self.bailianNeedsLogin = true
+                self.bailianUpdateItem.title = "百炼：\(self.concise(error.localizedDescription))"
+            }
+            self.updateQuotaVisibility()
+        }
     }
 
     private func render(_ state: DeepSeekBalanceClient.State) {
@@ -1761,7 +1860,11 @@ enum CodexQuotaBarMain {
               BailianPlanUsageClient.needsProfileFallback(stderr: authError),
               !BailianPlanUsageClient.needsProfileFallback(
                 stderr: #"{"error":{"code":9,"message":"Service unavailable"}}"#
-              ) else {
+              ),
+              AppDelegate.isLoginExpired("登录已过期，请重新登录"),
+              AppDelegate.isLoginExpired("Console session is not logged in or has expired."),
+              AppDelegate.isLoginExpired("No console access token found."),
+              !AppDelegate.isLoginExpired("百炼额度数据格式已变化") else {
             fputs("SELF_TEST_BAILIAN_ERROR_PARSING_FAILED\n", stderr)
             exit(1)
         }
